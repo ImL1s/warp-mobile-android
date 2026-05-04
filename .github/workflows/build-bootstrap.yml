@@ -36,6 +36,7 @@ on:
       - '.github/workflows/build-bootstrap.yml'
       - 'tools/scripts/build-bootstrap.sh'
       - 'tools/scripts/m4-bootstrap-packages.txt'
+      - 'tools/scripts/m4-bootstrap-snapshot.sha256'
 
 jobs:
   build:
@@ -43,7 +44,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install minimal tooling
         run: |
@@ -111,7 +112,7 @@ jobs:
           echo "PASS: retargeting applied to $REMAINING text files"
 
       - name: Upload bootstrap artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bootstrap-${{ inputs.arch || 'aarch64' }}
           path: |
