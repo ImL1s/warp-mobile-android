@@ -125,23 +125,20 @@ jobs:
       # - name: License + supply-chain check (cargo deny)
       #   run: cargo deny check
 
-      - name: Test warp_ai_mobile (18 tests)
-        # warp_ai_mobile has no warp-src deps — runs from main workspace.
-        run: cargo test -p warp_ai_mobile --no-fail-fast
+      # NOTE: All Rust tests run from warp-src/Cargo.toml because the
+      # main workspace contains android-host which has a path dep into
+      # warp-src/. Cargo resolves all workspace members at startup,
+      # hitting warp-src's workspace.dependencies inheritance. Running
+      # from warp-src's manifest avoids this cross-workspace issue.
 
-      - name: Test warp_terminal_mobile_facade (~73 tests)
-        # Facade lives in warp-src workspace; use its manifest-path.
+      - name: Test warp_ai_mobile (45 tests)
+        run: cargo test --manifest-path crates/warp_ai_mobile/Cargo.toml --no-fail-fast
+
+      - name: Test warp_terminal_mobile_facade (~89 tests)
         run: |
           cargo test -p warp_terminal_mobile_facade \
             --manifest-path warp-src/Cargo.toml \
             --no-fail-fast
-
-      # NOTE: android-host tests are skipped in CI because the crate
-      # lives in the main workspace but has a path dep into warp-src/,
-      # which uses workspace dep inheritance that cargo can't resolve
-      # cross-workspace. The android-host functionality is covered by
-      # the 642 Kotlin JVM tests in the android-test job.
-      # TODO: re-enable when warp-src becomes a proper submodule member.
 
   android-test:
     name: Android Kotlin compile + unit tests
