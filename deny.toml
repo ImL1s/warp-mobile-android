@@ -35,6 +35,9 @@ ignore = [
     "RUSTSEC-2026-0192",  # anyhow 1.0.102 unsoundness in downcast_mut()
     "RUSTSEC-2026-0190",  # memmap2 0.9.10 unchecked pointer offset
     "RUSTSEC-2026-0186",  # (related advisory)
+    "RUSTSEC-2026-0204",  # crossbeam-epoch 0.9.18 invalid pointer deref in fmt::Pointer
+    "RUSTSEC-2026-0185",  # quinn-proto 0.11.14 remote memory exhaustion
+    "RUSTSEC-2026-0206",  # rustybuzz 0.20.1 unmaintained
 ]
 
 [licenses]

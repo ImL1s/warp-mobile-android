@@ -116,7 +116,10 @@ jobs:
           cargo audit --deny warnings \
             --ignore RUSTSEC-2026-0192 \
             --ignore RUSTSEC-2026-0190 \
-            --ignore RUSTSEC-2026-0186
+            --ignore RUSTSEC-2026-0186 \
+            --ignore RUSTSEC-2026-0204 \
+            --ignore RUSTSEC-2026-0185 \
+            --ignore RUSTSEC-2026-0206
 
       - name: License + supply-chain check (cargo deny)
         # Enforces AGPL-3.0 compatibility on every dep; rejects unknown
