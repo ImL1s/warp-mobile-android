@@ -5,6 +5,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
+bash tools/scripts/setup-companion-sources.sh
+
 if [ -z "${ANDROID_NDK_ROOT:-}" ]; then
   echo "ERROR: ANDROID_NDK_ROOT not set. Run 'direnv allow' or 'source .envrc' first." >&2
   exit 1

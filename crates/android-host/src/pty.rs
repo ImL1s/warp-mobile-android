@@ -1,14 +1,39 @@
 use std::ffi::CString;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::thread;
 use std::ptr;
+
+static OPEN_PTY_COUNT: AtomicU32 = AtomicU32::new(0);
+static TOTAL_SPAWNED_PTYS: AtomicU64 = AtomicU64::new(0);
+
+pub fn active_pty_count() -> u32 {
+    OPEN_PTY_COUNT.load(Ordering::Acquire)
+}
+
+pub fn total_spawned_ptys() -> u64 {
+    TOTAL_SPAWNED_PTYS.load(Ordering::Acquire)
+}
+
+/// RAII Guard for raw file descriptors during PTY creation.
+struct FdGuard(i32);
+
+impl Drop for FdGuard {
+    fn drop(&mut self) {
+        if self.0 >= 0 {
+            unsafe {
+                libc::close(self.0);
+            }
+        }
+    }
+}
 
 pub struct PtySession {
     pub(crate) master_fd: AtomicI32,
     pub(crate) child_pid: libc::pid_t,
     killed: AtomicBool,
+    exit_status: AtomicI32, // -999 = running/unknown, else exit status or -signal
 }
 
 /// Spawn a PTY-attached child process.
@@ -40,12 +65,16 @@ pub fn spawn_pty(
         return Err(io::Error::last_os_error());
     }
 
+    // Wrap master and slave in RAII guards. If any pre-fork operation fails,
+    // master and slave will automatically be closed when guards drop.
+    let mut master_guard = FdGuard(master);
+    let mut slave_guard = FdGuard(slave);
+
     // FD_CLOEXEC on master so it doesn't leak across exec in parent
-    unsafe { libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC) };
+    unsafe { libc::fcntl(master_guard.0, libc::F_SETFD, libc::FD_CLOEXEC) };
 
     // ── pre-build all CStrings BEFORE fork ───────────────────────────────────
     let prog_cstr = CString::new(program).map_err(|_| {
-        unsafe { libc::close(master); libc::close(slave); }
         io::Error::new(io::ErrorKind::InvalidInput, "program contains nul byte")
     })?;
 
@@ -54,7 +83,6 @@ pub fn spawn_pty(
         .map(|&a| CString::new(a))
         .collect::<Result<_, _>>()
         .map_err(|_| {
-            unsafe { libc::close(master); libc::close(slave); }
             io::Error::new(io::ErrorKind::InvalidInput, "arg contains nul byte")
         })?;
 
@@ -79,14 +107,18 @@ pub fn spawn_pty(
     let pid = unsafe { libc::fork() };
     match pid {
         -1 => {
-            unsafe { libc::close(master); libc::close(slave); }
+            // Guards will automatically close master and slave on return
             Err(io::Error::last_os_error())
         }
         0 => {
             // ── child: only AS-safe calls after this point ───────────────────
+            let master_fd = master_guard.0;
+            let slave_fd = slave_guard.0;
+            master_guard.0 = -1;
+            slave_guard.0 = -1;
             unsafe {
                 libc::setsid();
-                libc::ioctl(slave, libc::TIOCSCTTY.into(), 0i32);
+                libc::ioctl(slave_fd, libc::TIOCSCTTY.into(), 0i32);
 
                 // V1-prep defensive hardening: seed a non-zero TTY window size
                 // so any TIOCGWINSZ before MainActivity sends its first
@@ -104,15 +136,15 @@ pub fn spawn_pty(
                     ws_xpixel: 0,
                     ws_ypixel: 0,
                 };
-                libc::ioctl(slave, libc::TIOCSWINSZ.into(), &ws);
+                libc::ioctl(slave_fd, libc::TIOCSWINSZ.into(), &ws);
 
-                libc::dup2(slave, 0);
-                libc::dup2(slave, 1);
-                libc::dup2(slave, 2);
-                if slave > 2 {
-                    libc::close(slave);
+                libc::dup2(slave_fd, 0);
+                libc::dup2(slave_fd, 1);
+                libc::dup2(slave_fd, 2);
+                if slave_fd > 2 {
+                    libc::close(slave_fd);
                 }
-                libc::close(master);
+                libc::close(master_fd);
 
                 // envp built in parent — use execve (no PATH lookup, fully AS-safe)
                 libc::execve(prog_cstr.as_ptr(), argv_ptrs.as_ptr(), envp_ptrs.as_ptr());
@@ -152,11 +184,20 @@ pub fn spawn_pty(
         }
         child_pid => {
             // ── parent ───────────────────────────────────────────────────────
-            unsafe { libc::close(slave); }
+            unsafe { libc::close(slave_guard.0); }
+            slave_guard.0 = -1;
+
+            let master_fd = master_guard.0;
+            master_guard.0 = -1;
+
+            OPEN_PTY_COUNT.fetch_add(1, Ordering::SeqCst);
+            TOTAL_SPAWNED_PTYS.fetch_add(1, Ordering::SeqCst);
+
             Ok(PtySession {
-                master_fd: AtomicI32::new(master),
+                master_fd: AtomicI32::new(master_fd),
                 child_pid,
                 killed: AtomicBool::new(false),
+                exit_status: AtomicI32::new(-999),
             })
         }
     }
@@ -200,6 +241,36 @@ impl PtySession {
         if ret < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 
+    /// Query non-blocking child process exit status via waitpid(WNOHANG).
+    /// Returns:
+    ///   - Some(status) where status >= 0 is WEXITSTATUS, or status < 0 is -WTERMSIG if terminated by signal.
+    ///   - Some(-1) if ECHILD or process was already reaped.
+    ///   - None if process is still running.
+    pub fn get_exit_status(&self) -> Option<i32> {
+        let current = self.exit_status.load(Ordering::Acquire);
+        if current != -999 {
+            return Some(current);
+        }
+        let mut status = 0i32;
+        let r = unsafe { libc::waitpid(self.child_pid, &mut status, libc::WNOHANG) };
+        if r > 0 {
+            let code = if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else if libc::WIFSIGNALED(status) {
+                -libc::WTERMSIG(status)
+            } else {
+                0
+            };
+            self.exit_status.store(code, Ordering::Release);
+            Some(code)
+        } else if r < 0 {
+            self.exit_status.store(-1, Ordering::Release);
+            Some(-1)
+        } else {
+            None
+        }
+    }
+
     /// Close master_fd immediately so concurrent reads return EBADF.
     /// Called by ptyKill before Arc ref-count decrement.
     pub fn kill_eager(&self) {
@@ -225,8 +296,21 @@ impl PtySession {
             let r = unsafe {
                 libc::waitpid(self.child_pid, &mut status, libc::WNOHANG)
             };
-            if r > 0 { return Ok(()); }
-            if r < 0 { return Ok(()); } // ECHILD — already reaped
+            if r > 0 {
+                let code = if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else if libc::WIFSIGNALED(status) {
+                    -libc::WTERMSIG(status)
+                } else {
+                    0
+                };
+                self.exit_status.store(code, Ordering::Release);
+                return Ok(());
+            }
+            if r < 0 {
+                self.exit_status.store(-1, Ordering::Release);
+                return Ok(());
+            }
             thread::sleep(Duration::from_millis(50));
         }
 
@@ -240,6 +324,7 @@ impl PtySession {
 impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.kill();
+        OPEN_PTY_COUNT.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

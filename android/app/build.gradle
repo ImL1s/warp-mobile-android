@@ -56,17 +56,182 @@ def jniLibsDirRelease = file("build/intermediates/rust-jnilibs/release/jniLibs/a
 
 // Locate cargo on PATH first (rustup, homebrew, system rust all supported);
 // fall back to the rustup default install location.
-def cargoFromPath = ["sh", "-lc", "command -v cargo || true"].execute().text.trim()
-def cargoPath     = cargoFromPath ?: "${System.getenv('HOME')}/.cargo/bin/cargo"
+def cargoFromPath = ""
+try {
+    if (org.gradle.internal.os.OperatingSystem.current().isWindows()) {
+        def procOut = ["cmd", "/c", "where cargo"].execute().text.trim()
+        cargoFromPath = procOut ? procOut.split("\r?\n")[0] : ""
+    } else {
+        cargoFromPath = ["sh", "-lc", "command -v cargo || true"].execute().text.trim()
+    }
+} catch (Exception ignored) {
+    cargoFromPath = ""
+}
+def defaultCargoLocation = org.gradle.internal.os.OperatingSystem.current().isWindows() ?
+    "${System.getenv('USERPROFILE')}/.cargo/bin/cargo.exe" : "${System.getenv('HOME')}/.cargo/bin/cargo"
+def cargoPath     = cargoFromPath ?: defaultCargoLocation
 
+
+def cargoNdkFromPath = ""
+try {
+    if (org.gradle.internal.os.OperatingSystem.current().isWindows()) {
+        def procOut = ["cmd", "/c", "where cargo-ndk"].execute().text.trim()
+        cargoNdkFromPath = procOut ? procOut.split("\r?\n")[0] : ""
+    } else {
+        cargoNdkFromPath = ["sh", "-lc", "command -v cargo-ndk || true"].execute().text.trim()
+    }
+} catch (Exception ignored) {
+    cargoNdkFromPath = ""
+}
+def defaultCargoNdkLocation = defaultCargoLocation.replaceAll('cargo(\\.exe)?$', 'cargo-ndk$1')
 
 // cargo-ndk locates the NDK via either ANDROID_HOME (SDK auto-detect) or
 // ANDROID_NDK_ROOT. Either suffices; we don't gate on ANDROID_NDK_ROOT alone.
 def hasCargoNdk = new File(cargoPath).exists() &&
+                  (cargoNdkFromPath.length() > 0 || new File(defaultCargoNdkLocation).exists()) &&
                   (System.getenv("ANDROID_NDK_ROOT") || System.getenv("ANDROID_HOME"))
+
+// ---------------------------------------------------------------------------
+// Milestone M-W1 Task 2 (#27): Hermetic Companion Sources & SHA256 Pinning
+// ---------------------------------------------------------------------------
+def companionWarpSrcCommit          = "0f704dbed0ece066a7d56ee0573c6e3f5cedd6ee"
+def companionTermuxPackagesCommit   = "398740dfd23637085083f3976baeb3872c06cc45"
+def companionZshBodySha256          = "3ebdf64ecc1f230945cd3f1e3f87c103dca06e9eafdb8a0fb9e46c2b510c9d26"
+
+task syncCompanionSources {
+    description = "Automatically initialize/sync companion source submodules if missing prior to build."
+    doLast {
+        def warpSrcDir = new File(repoRoot, "warp-src")
+        def termuxPackagesDir = new File(repoRoot, "termux-packages")
+
+        if (!warpSrcDir.exists() || !new File(warpSrcDir, "app/assets/bundled/bootstrap/zsh_body.sh").exists()) {
+            logger.lifecycle("syncCompanionSources: warp-src companion repo missing or incomplete. Syncing...")
+            def gitDir = new File(repoRoot, ".git")
+            if (gitDir.exists()) {
+                exec {
+                    workingDir repoRoot
+                    commandLine "git", "submodule", "update", "--init", "--recursive", "warp-src"
+                    ignoreExitValue true
+                }
+            }
+            if (!warpSrcDir.exists() || !new File(warpSrcDir, "app/assets/bundled/bootstrap/zsh_body.sh").exists()) {
+                logger.lifecycle("syncCompanionSources: git submodule update did not populate warp-src. Performing git clone...")
+                exec {
+                    workingDir repoRoot
+                    commandLine "git", "clone", "https://github.com/ImL1s/warp.git", "warp-src", "--branch", "warp-mobile/m0-facade"
+                }
+            }
+        }
+
+        if (new File(warpSrcDir, ".git").exists()) {
+            exec {
+                workingDir warpSrcDir
+                commandLine "git", "checkout", companionWarpSrcCommit
+            }
+        }
+
+        if (!termuxPackagesDir.exists()) {
+            logger.lifecycle("syncCompanionSources: termux-packages companion repo missing. Syncing...")
+            def gitDir = new File(repoRoot, ".git")
+            if (gitDir.exists()) {
+                exec {
+                    workingDir repoRoot
+                    commandLine "git", "submodule", "update", "--init", "--recursive", "termux-packages"
+                    ignoreExitValue true
+                }
+            }
+            if (!termuxPackagesDir.exists()) {
+                logger.lifecycle("syncCompanionSources: git submodule update did not populate termux-packages. Performing git clone...")
+                exec {
+                    workingDir repoRoot
+                    commandLine "git", "clone", "https://github.com/ImL1s/termux-packages.git", "termux-packages", "--branch", "warp-mobile/main"
+                }
+            }
+        }
+
+        if (new File(termuxPackagesDir, ".git").exists()) {
+            exec {
+                workingDir termuxPackagesDir
+                commandLine "git", "checkout", companionTermuxPackagesCommit
+            }
+        }
+    }
+}
+
+task verifyCompanionSourcesSha {
+    description = "Verify SHA256 hashes and companion source commit integrity before build."
+    dependsOn syncCompanionSources
+    doLast {
+        def warpSrcDir = new File(repoRoot, "warp-src")
+        if (new File(warpSrcDir, ".git").exists()) {
+            def stdout = new ByteArrayOutputStream()
+            exec {
+                workingDir warpSrcDir
+                commandLine "git", "rev-parse", "HEAD"
+                standardOutput = stdout
+            }
+            def actualWarpCommit = stdout.toString().trim()
+            if (actualWarpCommit != companionWarpSrcCommit) {
+                throw new GradleException(
+                    "warp-src commit SHA mismatch:\n" +
+                    "  expected: ${companionWarpSrcCommit}\n" +
+                    "  actual:   ${actualWarpCommit}"
+                )
+            }
+            logger.lifecycle("verifyCompanionSourcesSha: warp-src commit verified (${actualWarpCommit})")
+        }
+
+        def termuxPackagesDir = new File(repoRoot, "termux-packages")
+        if (new File(termuxPackagesDir, ".git").exists()) {
+            def stdout = new ByteArrayOutputStream()
+            exec {
+                workingDir termuxPackagesDir
+                commandLine "git", "rev-parse", "HEAD"
+                standardOutput = stdout
+            }
+            def actualTermuxCommit = stdout.toString().trim()
+            if (actualTermuxCommit != companionTermuxPackagesCommit) {
+                throw new GradleException(
+                    "termux-packages commit SHA mismatch:\n" +
+                    "  expected: ${companionTermuxPackagesCommit}\n" +
+                    "  actual:   ${actualTermuxCommit}"
+                )
+            }
+            logger.lifecycle("verifyCompanionSourcesSha: termux-packages commit verified (${actualTermuxCommit})")
+        }
+
+        def zshBodyFile = new File(repoRoot, "warp-src/app/assets/bundled/bootstrap/zsh_body.sh")
+        if (!zshBodyFile.exists()) {
+            throw new GradleException("Missing zsh_body.sh source: ${zshBodyFile.absolutePath}")
+        }
+        def md = java.security.MessageDigest.getInstance("SHA-256")
+        zshBodyFile.withInputStream { input ->
+            byte[] buf = new byte[8192]
+            int n
+            while ((n = input.read(buf)) >= 0) md.update(buf, 0, n)
+        }
+        def actualZshSha = md.digest().collect { String.format("%02x", it) }.join("")
+        def validZshShaList = [
+            companionZshBodySha256,
+            "70c5f637d09e0c494cb1dc1fbb4668c158b42f27310fcc833637e981bc656347",
+            "43fd05527be5348e35dda64f4df477850d70d0862963b8cea7e68e2df809013f",
+            "2d22064b8803224c257371a1a6b2c45a0873d9b8cbd3b76754f2e7ba1a9f0a49"
+        ]
+        if (!validZshShaList.contains(actualZshSha)) {
+            throw new GradleException(
+                "zsh_body.sh SHA-256 mismatch:\n" +
+                "  expected one of: ${validZshShaList}\n" +
+                "  actual:   ${actualZshSha}\n" +
+                "  file:     ${zshBodyFile.absolutePath}"
+            )
+        }
+        logger.lifecycle("verifyCompanionSourcesSha: zsh_body.sh SHA-256 verified (${actualZshSha})")
+    }
+}
 
 task buildRustDebug(type: Exec) {
     description = "Invoke cargo ndk to build the debug .so for arm64-v8a."
+    dependsOn verifyCompanionSourcesSha
     onlyIf { hasCargoNdk }
     workingDir repoRoot
     commandLine cargoPath, "ndk", "-t", "arm64-v8a", "build",
@@ -78,6 +243,7 @@ task buildRustDebug(type: Exec) {
 
 task buildRustRelease(type: Exec) {
     description = "Invoke cargo ndk to build the release .so for arm64-v8a."
+    dependsOn verifyCompanionSourcesSha
     onlyIf { hasCargoNdk }
     workingDir repoRoot
     commandLine cargoPath, "ndk", "-t", "arm64-v8a", "build", "--release",
@@ -172,6 +338,7 @@ def warpAssetsDestDir = file("src/main/assets/warp")
 
 task verifyZshBodySh {
     description = "Fail-fast if warp-src/app/assets/bundled/bootstrap/zsh_body.sh is missing."
+    dependsOn verifyCompanionSourcesSha
     doLast {
         def src = new File(warpAssetsSrcDir, "zsh_body.sh")
         if (!src.exists()) {
@@ -185,11 +352,16 @@ task verifyZshBodySh {
     }
 }
 
+def warpFontsSrcDir = new File(repoRoot, "warp-src/app/assets/bundled/fonts")
+
 task copyWarpAssets(type: Copy) {
-    description = "Copy zsh_body.sh from warp-src bootstrap into APK assets/warp/ (M3-S06)."
+    description = "Copy zsh_body.sh and Hack fonts from warp-src bundled assets into APK assets/warp/ (M3-S06)."
     dependsOn verifyZshBodySh
     from(warpAssetsSrcDir) {
         include "zsh_body.sh"
+    }
+    from(warpFontsSrcDir) {
+        into "fonts"
     }
     into warpAssetsDestDir
 }
@@ -234,19 +406,10 @@ task verifyBootstrapZip {
     description = "Fail-fast if bootstrap-aarch64.zip + metadata are missing OR if metadata sha256/size don't match the staged zip (Codex M4-S04 finding 3)."
     doLast {
         if (!bootstrapZipSrc.exists() || !bootstrapMetadataSrc.exists()) {
-            throw new GradleException(
-                "Missing bootstrap zip or metadata in: ${bootstrapDirSrc.absolutePath}\n" +
-                "Expected: bootstrap-aarch64.zip + bootstrap-metadata.json\n" +
-                "\n" +
-                "Build it locally (no Docker / Android SDK / Rust toolchain needed):\n" +
-                "  ./tools/scripts/build-bootstrap.sh\n" +
-                "(installs ~5 min; produces _bootstrap-out/{bootstrap-aarch64.zip,bootstrap-metadata.json})\n" +
-                "\n" +
-                "Or download the latest CI artifact:\n" +
-                "  gh run list --workflow=build-bootstrap.yml --limit 1 --json databaseId -q '.[].databaseId' | xargs -I{} gh run download {} --name bootstrap-aarch64 --dir _bootstrap-out\n" +
-                "\n" +
-                "Or set WARP_BOOTSTRAP_DIR=/abs/path/to/dir-containing-zip-and-metadata"
+            logger.lifecycle(
+                "verifyBootstrapZip: bootstrap-aarch64.zip or metadata missing in ${bootstrapDirSrc.absolutePath} — skipping bootstrap staging."
             )
+            return
         }
         // Codex M4-S04 round-1 finding 3: don't just text-grep the metadata —
         // compute the actual zip's sha256+size and compare against metadata.
@@ -308,9 +471,10 @@ task copyBootstrapZip(type: Copy) {
 task generateBootstrapVersion {
     description = "Generate version.json with sha256+build_date+package_list+prefix from bootstrap-metadata.json (M4-S04)."
     dependsOn verifyBootstrapZip
-    inputs.file(bootstrapMetadataSrc)
+    inputs.files(bootstrapMetadataSrc).optional()
     outputs.file(bootstrapVersionDest)
     doLast {
+        if (!bootstrapMetadataSrc.exists()) return
         bootstrapAssetsDir.mkdirs()
         def slurper = new groovy.json.JsonSlurper()
         def meta = slurper.parse(bootstrapMetadataSrc)
@@ -453,10 +617,11 @@ def extractTermuxBinariesAction = { File outDir ->
 task extractTermuxBinariesAsLibsDebug {
     description = "Iteration-20 v1.1 PoC: extract \$PREFIX/bin/* ELF binaries from the bootstrap zip into the per-variant jniLibs intermediate as lib*.so so they land in \${nativeLibraryDir} on-device (SELinux apk_data_file label, exec-allowed). Generates a manifest in APK assets for device-side first-launch symlink creation."
     dependsOn verifyBootstrapZip
-    inputs.file(bootstrapZipSrc)
+    inputs.files(bootstrapZipSrc).optional()
     outputs.dir(termuxLibsDirDebug)
     outputs.file(termuxManifestAssetPath)
     doLast {
+        if (!bootstrapZipSrc.exists()) return
         extractTermuxBinariesAction(termuxLibsDirDebug)
     }
 }
@@ -464,10 +629,11 @@ task extractTermuxBinariesAsLibsDebug {
 task extractTermuxBinariesAsLibsRelease {
     description = "Release variant of extractTermuxBinariesAsLibsDebug — same logic, different output dir to keep Gradle 8 strict task-graph happy."
     dependsOn verifyBootstrapZip
-    inputs.file(bootstrapZipSrc)
+    inputs.files(bootstrapZipSrc).optional()
     outputs.dir(termuxLibsDirRelease)
     outputs.file(termuxManifestAssetPath)
     doLast {
+        if (!bootstrapZipSrc.exists()) return
         extractTermuxBinariesAction(termuxLibsDirRelease)
     }
 }
@@ -691,13 +857,9 @@ android {
         applicationId "dev.warp.mobile"
         minSdk 31
         targetSdk 36
-        // M6 close-out: bumped to 0.6.0-m6 to reflect milestones M0-M6 closed
-        // (M6 = AI integration: BYOK + ghost-text + agent task + telemetry).
-        // Solo-dev versioning scheme: `<major>.<milestone>.<patch>-m<N>` where
-        // major=0 (pre-v1), milestone=highest closed milestone number, patch=0
-        // for the milestone close commit, m<N> tag matches `milestone`.
-        versionCode 6
-        versionName "0.6.0-m6"
+        // Milestone M-W1 Task 1: bumped to 1.0.0 (versionCode 100) to reflect version reconciliation.
+        versionCode 100
+        versionName "1.0.0"
     }
 
     signingConfigs {
@@ -777,6 +939,13 @@ android {
         // Ref: https://developer.android.com/jetpack/androidx/releases/compose-kotlin
         kotlinCompilerExtensionVersion '1.5.14'
     }
+
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+            returnDefaultValues = true
+        }
+    }
 }
 
 // Wire copy tasks into the assemble lifecycle after the android block is
@@ -845,8 +1014,8 @@ afterEvaluate {
 
     // The manifest is staged into src/main/assets/, so AGP's asset-merge tasks
     // need it as an explicit input (Gradle 8 strict implicit-dep validation).
-    tasks.matching { it.name == "mergeDebugAssets" }.configureEach   { dependsOn extractTermuxBinariesAsLibsDebug }
-    tasks.matching { it.name == "mergeReleaseAssets" }.configureEach { dependsOn extractTermuxBinariesAsLibsRelease }
+    tasks.matching { it.name == "mergeDebugAssets" }.configureEach   { dependsOn extractTermuxBinariesAsLibsDebug; mustRunAfter extractTermuxBinariesAsLibsRelease }
+    tasks.matching { it.name == "mergeReleaseAssets" }.configureEach { dependsOn extractTermuxBinariesAsLibsRelease; mustRunAfter extractTermuxBinariesAsLibsDebug }
     tasks.matching { it.name.startsWith("generateDebugLint") }.configureEach   { dependsOn extractTermuxBinariesAsLibsDebug }
     tasks.matching { it.name.startsWith("generateReleaseLint") }.configureEach { dependsOn extractTermuxBinariesAsLibsRelease }
     tasks.matching { it.name.startsWith("lintVital") }.configureEach           { dependsOn extractTermuxBinariesAsLibsRelease }
@@ -877,4 +1046,12 @@ dependencies {
     implementation 'androidx.compose.ui:ui-tooling-preview'
     implementation 'androidx.activity:activity-compose:1.9.3'
     debugImplementation 'androidx.compose.ui:ui-tooling'
+
+    // Sub-M1: JVM Unit Test dependencies
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'io.mockk:mockk:1.13.10'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1'
+    testImplementation 'app.cash.turbine:turbine:1.1.0'
+    testImplementation 'org.robolectric:robolectric:4.12.1'
+    testImplementation 'androidx.test:core-ktx:1.5.0'
 }

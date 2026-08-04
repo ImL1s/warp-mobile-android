@@ -1,5 +1,6 @@
 package dev.warp.mobile
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -9,6 +10,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Choreographer
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -31,6 +33,8 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 
 /**
@@ -120,25 +124,29 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             // The terminalMode path falls back to gridMode if dirty=0 AND
             // a static grid was previously initialized, so the user always
             // sees text not just a magenta wash between PTY chunks.
-            val ok = when {
-                terminalMode -> {
-                    val pushResult = NativeBridge.terminalTakeDirtyAndPushFrame(
-                        gridFontSizePx, gridRows, gridCols, gridCellWPx, gridCellHPx
-                    )
-                    when (pushResult) {
-                        // M3-S08: dirty bit set; the JNI re-initialized the
-                        // dynamic_grid + presented one frame.
-                        1 -> true
-                        // No-dirty fallback: re-present the last dynamic_grid
-                        // snapshot so the user keeps seeing the per-cell text
-                        // instead of a clear-color frame between PTY chunks.
-                        // Black clear matches the bg of the in-flight cells.
-                        0 -> NativeBridge.renderDrawDynamicGridFrame(0.0f, 0.0f, 0.0f, 1.0f)
-                        else -> false
+            val ok = try {
+                when {
+                    terminalMode -> {
+                        val pushResult = NativeBridge.terminalTakeDirtyAndPushFrame(
+                            gridFontSizePx, gridRows, gridCols, gridCellWPx, gridCellHPx
+                        )
+                        when (pushResult) {
+                            // M3-S08: dirty bit set; the JNI re-initialized the
+                            // dynamic_grid + presented one frame.
+                            1 -> true
+                            // No-dirty fallback: re-present the last dynamic_grid
+                            // snapshot so the user keeps seeing the per-cell text
+                            // instead of a clear-color frame between PTY chunks.
+                            // Black clear matches the bg of the in-flight cells.
+                            0 -> NativeBridge.renderDrawDynamicGridFrame(0.0f, 0.0f, 0.0f, 1.0f)
+                            else -> false
+                        }
                     }
+                    gridMode -> NativeBridge.renderDrawGridFrame(1.0f, 0.0f, 1.0f, 1.0f)
+                    else -> NativeBridge.renderClearFrame(1.0f, 0.0f, 1.0f, 1.0f)
                 }
-                gridMode -> NativeBridge.renderDrawGridFrame(1.0f, 0.0f, 1.0f, 1.0f)
-                else -> NativeBridge.renderClearFrame(1.0f, 0.0f, 1.0f, 1.0f)
+            } catch (t: Throwable) {
+                false
             }
             if (!ok) {
                 // VK_ERROR_OUT_OF_DATE_KHR or transient: skip + retry next vsync.
@@ -180,9 +188,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             gridMode = true
             return
         }
-        val initOk = NativeBridge.renderInitStaticGrid(
-            text, fontSizePx, rows, cols, cellWPx, cellHPx
-        )
+        val initOk = try {
+            NativeBridge.renderInitStaticGrid(
+                text, fontSizePx, rows, cols, cellWPx, cellHPx
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "renderInitStaticGrid JNI fallback: ${t.message}")
+            false
+        }
         Log.i(
             TAG,
             "renderInitStaticGrid ok=$initOk text=\"$text\" rows=$rows cols=$cols " +
@@ -190,7 +203,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         )
         if (initOk) {
             gridMode = true
-            val stats = NativeBridge.renderStaticGridStats()
+            val stats = try {
+                NativeBridge.renderStaticGridStats()
+            } catch (t: Throwable) {
+                "stats-unavailable"
+            }
             Log.i(TAG, "static_grid_started $stats")
         }
     }
@@ -222,7 +239,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
         GlobalScope.launch(Dispatchers.IO) {
             val t0 = System.currentTimeMillis()
-            val status = NativeBridge.bootstrapInstall(assets, applicationInfo.dataDir)
+            val status = try { NativeBridge.bootstrapInstall(assets, applicationInfo.dataDir) } catch (t: Throwable) { -1 }
             val elapsed = System.currentTimeMillis() - t0
             Log.i(
                 "warp.bootstrap",
@@ -278,8 +295,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         // and the framework's IME-routing assumes the focused View also owns
         // the visible content, so we host an invisible focusable View on top.
         val frame = FrameLayout(this)
-        val surfaceView = SurfaceView(this)
-        surfaceView.holder.addCallback(this)
+        val surfaceView = SurfaceView(this).apply {
+            setZOrderMediaOverlay(true)
+        }
         frame.addView(
             surfaceView,
             FrameLayout.LayoutParams(
@@ -313,15 +331,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         // warpInputView (later children of FrameLayout sit higher in
         // Z-order and get touch dispatch first).
         accessoryRow = AccessoryRow(this).apply {
-            // V1-prep iteration 25 (2026-05-02): legacy_layout path keeps
-            // the GONE-by-default + WindowInsets-listener-driven toggle
-            // (modifier keys only show alongside the IME). Compose path
-            // overrides this below to View.VISIBLE because the legacy
-            // listener does not fire when `frame` is wrapped by an
-            // AndroidView (Compose consumes the WindowInsets dispatch
-            // before children of AndroidView see it).
             visibility = View.GONE
         }
+        warpInputView?.accessoryRow = accessoryRow
         frame.addView(
             accessoryRow,
             FrameLayout.LayoutParams(
@@ -374,6 +386,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         // legacy_layout escape hatch only). Visibility is
                         // still IME-driven via the listener at MainActivity
                         // line ~454.
+                        val appState by SessionManager.getInstance(this@MainActivity).appState.collectAsState()
                         val tabs = remember {
                             listOf(
                                 dev.warp.mobile.ui.WarpTab(
@@ -386,33 +399,66 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         dev.warp.mobile.ui.WarpScaffold(
                             tabs = tabs,
                             activeTabId = "terminal_mode",
+                            blocks = appState.blocks,
+                            isRawMode = appState.isRawMode,
                             onTabSelected = { _ -> /* M7-S06 multi-tab wiring */ },
                             onNewTab = { /* M7-S06 multi-tab wiring */ },
                             onSettings = {
                                 startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
                             },
                             onPromptSubmit = { promptText ->
-                                // M9-S05 will wire this to the BYOK agent.
-                                // For now, treat as a literal command typed
-                                // into the active PTY (a thin shim that
-                                // proves the prompt-box plumbing works).
-                                WarpInputView.writeBytesToActivePty(
-                                    this@MainActivity,
-                                    (promptText + "\n").toByteArray(Charsets.UTF_8)
-                                )
+                                val activeProfile = dev.warp.mobile.ai.ModelProfileRepository.getActiveProfile(this@MainActivity)
+                                dev.warp.mobile.ai.CommandApprovalManager.requestApproval(
+                                    context = this@MainActivity,
+                                    command = promptText,
+                                    model = activeProfile.id
+                                ) { approved ->
+                                    if (approved) {
+                                        WarpInputView.writeBytesToActivePty(
+                                            this@MainActivity,
+                                            (promptText + "\n").toByteArray(Charsets.UTF_8)
+                                        )
+                                    }
+                                }
+                            },
+                            onRerunBlock = { block ->
+                                val activeId = appState.activeSessionId ?: "terminal_mode"
+                                val payload = (block.command + "\r").toByteArray(Charsets.UTF_8)
+                                val intent = Intent(WarpTerminalService.ACTION_WRITE).apply {
+                                    component = ComponentName(packageName, "$packageName.PtyBroadcastReceiver")
+                                    putExtra("cmd_id", activeId)
+                                    putExtra("data", payload)
+                                }
+                                sendBroadcast(intent)
+                            },
+                            onExplainBlock = { block ->
+                                SessionManager.getInstance(this@MainActivity).insertExplanationCard(block)
+                            },
+                            onShareBlock = { block ->
+                                BlockShareManager.shareBlock(this@MainActivity, block)
                             }
                         ) { innerPadding ->
-                            androidx.compose.ui.viewinterop.AndroidView(
-                                factory = { frame },
+                            dev.warp.mobile.ui.TerminalCanvas(
                                 modifier = androidx.compose.ui.Modifier
                                     .fillMaxSize()
-                                    .padding(innerPadding)
+                                    .padding(innerPadding),
+                                isRawMode = appState.isRawMode,
+                                terminalMode = terminalMode,
+                                gridFontSizePx = gridFontSizePx,
+                                gridCellWPx = gridCellWPx,
+                                gridCellHPx = gridCellHPx,
+                                gridRows = gridRows,
+                                gridCols = gridCols,
+                                customView = frame
                             )
                         }
                     }
                 }
             }
             setContentView(composeView)
+        }
+        if (!composePath) {
+            surfaceView.holder.addCallback(this)
         }
         warpInputView!!.requestFocus()
         // M2-S10: publish the input view to companion object so the
@@ -466,7 +512,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             // collapse the visible terminal area to ~0 px (the bug from
             // iteration-25 first attempt).
             if (!composePath) {
-                NativeBridge.setRenderInsets(sysBars.top, sysBars.left, sysBars.right, effectiveBottom)
+                try {
+                    NativeBridge.setRenderInsets(sysBars.top, sysBars.left, sysBars.right, effectiveBottom)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "setRenderInsets JNI fallback: ${t.message}")
+                }
             }
 
             // M5-S02: accessory row visibility + position. When IME is up
@@ -542,7 +592,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             )
         }
 
-        Log.i(TAG, "MainActivity ready ping=${NativeBridge.ping()} input_focus=${warpInputView!!.isFocused}")
+        val ping = try { NativeBridge.ping() } catch (t: Throwable) { "JNI-absent" }
+        Log.i(TAG, "MainActivity ready ping=$ping input_focus=${warpInputView!!.isFocused}")
 
         // M2-S08: optional grid mode via launch intent extras. Driver uses
         //   am start -n dev.warp.mobile/.MainActivity \
@@ -639,7 +690,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             gridCols = intent.getIntExtra("grid_cols", derivedCols)
             warpInputView?.setCellHeightPx(gridCellHPx)
             warpInputView?.resetScroll()
-            NativeBridge.terminalResize(gridRows, gridCols)
+            try {
+                NativeBridge.terminalResize(gridRows, gridCols)
+            } catch (t: Throwable) {
+                Log.w(TAG, "terminalResize JNI fallback: ${t.message}")
+            }
             Log.i(
                 TAG,
                 "terminal_mode rows=$gridRows cols=$gridCols " +
@@ -829,7 +884,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 )
                 gridRows = newRows
                 gridCols = newCols
-                NativeBridge.terminalResize(newRows, newCols)
+                try {
+                    NativeBridge.terminalResize(newRows, newCols)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "terminalResize JNI fallback: ${t.message}")
+                }
                 // PTY winsize: tell zsh the terminal got resized.
                 val resizeIntent = Intent(WarpTerminalService.ACTION_RESIZE).apply {
                     setPackage(packageName)
@@ -849,13 +908,22 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         attachedWidth = -1
         attachedHeight = -1
         Choreographer.getInstance().removeFrameCallback(frameCallback)
-        NativeBridge.renderDetachSurface()
+        try {
+            NativeBridge.renderDetachSurface()
+        } catch (t: Throwable) {
+            Log.w(TAG, "renderDetachSurface JNI fallback: ${t.message}")
+        }
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
 
     private fun attachAndStartRender(surface: Surface, width: Int = -1, height: Int = -1) {
-        val ok = NativeBridge.renderAttachSurface(surface)
+        val ok = try {
+            NativeBridge.renderAttachSurface(surface)
+        } catch (t: Throwable) {
+            Log.w(TAG, "renderAttachSurface JNI fallback: ${t.message}")
+            false
+        }
         Log.i(TAG, "renderAttachSurface ok=$ok")
         if (ok) {
             // M2-S09: cache dims so the followup surfaceChanged with the same
@@ -884,9 +952,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             // the init now while we have a valid swapchain. The Rust side
             // builds the atlas + pipeline against the current render_pass.
             if (gridMode) {
-                val initOk = NativeBridge.renderInitStaticGrid(
-                    gridText, gridFontSizePx, gridRows, gridCols, gridCellWPx, gridCellHPx
-                )
+                val initOk = try {
+                    NativeBridge.renderInitStaticGrid(
+                        gridText, gridFontSizePx, gridRows, gridCols, gridCellWPx, gridCellHPx
+                    )
+                } catch (t: Throwable) {
+                    Log.w(TAG, "renderInitStaticGrid JNI fallback: ${t.message}")
+                    false
+                }
                 Log.i(
                     TAG,
                     "renderInitStaticGrid (post-surfaceCreated) ok=$initOk " +
@@ -894,7 +967,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         "cell=${gridCellWPx}x${gridCellHPx}px font_size_px=$gridFontSizePx"
                 )
                 if (initOk) {
-                    val stats = NativeBridge.renderStaticGridStats()
+                    val stats = try {
+                        NativeBridge.renderStaticGridStats()
+                    } catch (t: Throwable) {
+                        "stats-unavailable"
+                    }
                     Log.i(TAG, "static_grid_started $stats")
                 } else {
                     // Disable grid mode; doFrame will fall back to clear so
@@ -905,6 +982,16 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             }
             Choreographer.getInstance().postFrameCallback(frameCallback)
         }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_ESCAPE || event.keyCode == KeyEvent.KEYCODE_TAB) {
+            val focused = currentFocus
+            if (focused is WarpInputView) {
+                return focused.dispatchKeyEvent(event)
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     companion object {

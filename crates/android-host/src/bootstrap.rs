@@ -40,6 +40,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 use std::sync::Mutex;
@@ -218,12 +219,17 @@ fn apply_symlinks_txt(root: &Path, data: &[u8]) -> io::Result<()> {
             // forbidding absolute or `..`-containing targets would also
             // forbid valid Termux usage (e.g. /system/bin/sh fallback).
             // The tighter check belongs in build-bootstrap.sh, not here.
+            #[cfg(unix)]
             symlink(target, &link_path).map_err(|e| {
                 io::Error::new(
                     e.kind(),
                     format!("symlink({} → {}): {}", linkname, target, e),
                 )
             })?;
+            #[cfg(not(unix))]
+            {
+                let _ = (&link_path, target);
+            }
         }
     }
     Ok(())
@@ -308,6 +314,7 @@ fn extract_zip_to(dest_root: &Path, zip_bytes: &[u8]) -> io::Result<Option<Vec<u
                 .open(&outpath)?;
             io::copy(&mut entry, &mut outfile)?;
             // Apply Unix permissions if present in zip metadata.
+            #[cfg(unix)]
             if let Some(mode) = entry.unix_mode() {
                 fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
             }

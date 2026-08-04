@@ -1,6 +1,6 @@
 [package]
 name = "warp-mobile-android-host"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Warp Mobile Android — JNI host crate (PTY, IME, terminal model, font render, Vulkan, AI client, bootstrap extractor)"
@@ -47,6 +47,7 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 # `cargo tree -p warp_mobile_android_link --target aarch64-linux-android |
 # grep -i metal` returning empty.
 warp_mobile_android_link = { path = "../../warp-src/crates/warp_mobile_android_link" }
+warp_terminal_mobile_facade = { path = "../../warp-src/crates/warp_terminal_mobile_facade" }
 
 # M6-S03 round-2: Anthropic Claude async client (warp_ai_mobile crate
 # in this same workspace). Top-level (not Android-target-only) because

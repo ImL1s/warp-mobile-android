@@ -10,29 +10,16 @@ import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONObject
 
 /**
- * M6-S06: per-session token usage tracker + opt-in CSV log.
+ * M6-S06 & Issue #15: per-session token usage tracker + 7-column CSV audit log.
  *
  * Tracks cumulative input/output token counts for the current process
- * lifetime. SettingsActivity reads these counters to show "Cumulative
- * tokens this session" in the cost-warning footer.
+ * lifetime.
  *
- * Persistence: per-request rows are appended to
- *   $PREFIX/var/log/warp-ai-usage.csv
- * iff the M4-S05-extracted bootstrap is present (ie. usr/var/log
- * exists). Without that path we silently skip the disk log — the
- * in-memory counters still work for the SettingsActivity display.
+ * Persistence: per-request audit entries are appended to
+ *   $PREFIX/var/log/warp-ai-usage.csv (or <dataDir>/files/warp-ai-usage.csv fallback)
  *
- * Extraction from response: Anthropic non-streaming responses include
- *   { "usage": { "input_tokens": N, "output_tokens": M } }
- * Streaming responses send a final `message_delta` event with usage.
- * For round-1 we extract the count from the FULL non-streaming
- * response body (the synchronous Java AnthropicClient.testConnection
- * path) + the assembled streaming response from messages_stream.
- *
- * NOT thread-safe with regard to disk writes — multiple concurrent
- * ghost-text streams could interleave CSV rows. Acceptable: rows are
- * single-line; worst case is mid-line garbling, not data corruption.
- * AtomicLong counters ARE thread-safe.
+ * Schema (7 columns):
+ *   timestamp,model,input_tokens,output_tokens,latency_ms,command_string,approval_state
  */
 object AiUsageTracker {
     private const val LOG_TAG = "WarpAiUsage"
@@ -42,25 +29,16 @@ object AiUsageTracker {
     private val sessionOutputTokens = AtomicLong(0)
     private val sessionGhostCalls = AtomicLong(0)
     private val sessionAgentCalls = AtomicLong(0)
+
     /** Latency p95 sentinels: rolling list of last 100 latencies per kind. */
     private val ghostLatencies = ArrayDeque<Long>()
     private val agentLatencies = ArrayDeque<Long>()
 
-    /**
-     * Lock for CSV append + cross-thread mutex so concurrent ghost-text
-     * + agent record() calls don't interleave half-rows. Round-3 review
-     * MEDIUM #5 — `File.appendText` is not atomic.
-     */
+    /** Lock for CSV appends across threads. */
     private val csvLock = Any()
 
     /**
-     * Record one completed AI call. `kind` = "ghost" or "agent" (matches
-     * the M6-S06 AC token-cap split). `inputTokens` / `outputTokens` come
-     * from Anthropic's `usage` field; pass 0 if the response didn't
-     * include usage (some streaming intermediate states).
-     *
-     * Updates in-memory counters AND appends a CSV row (if log path
-     * available).
+     * Record one completed AI call. Updates in-memory counters and writes to CSV.
      */
     fun record(
         context: Context,
@@ -88,13 +66,16 @@ object AiUsageTracker {
                 }
             }
         }
-        appendCsvRow(context, kind, model, inputTokens, outputTokens, latencyMs)
+        recordAudit(
+            context = context,
+            model = model,
+            inputTokens = inputTokens,
+            outputTokens = outputTokens,
+            latencyMs = latencyMs,
+            commandString = "",
+            approvalState = "AUTO_ALLOWED"
+        )
 
-        // Token-cap warning per ralplan §6 M6 #4 (ghost ≤200; agent
-        // ≤2000). The output-token check is fixed-cap; the latency
-        // figure is logged for context (rolling p95 over last 100).
-        // Round-3 review MEDIUM #4: the percentile() read needs the
-        // same synchronized() block as the write path.
         val p95 = when (kind) {
             "ghost" -> synchronized(ghostLatencies) { percentile(ghostLatencies, 0.95) }
             "agent" -> synchronized(agentLatencies) { percentile(agentLatencies, 0.95) }
@@ -102,8 +83,6 @@ object AiUsageTracker {
         }
         val tokenCap = if (kind == "ghost") 200 else 2000
         if (outputTokens > tokenCap * 1.5) {
-            // 50% above cap → log a warning so a future telemetry
-            // sweep can flag run-aways.
             Log.w(
                 LOG_TAG,
                 "token cap exceeded: kind=$kind output=$outputTokens cap=$tokenCap p95latency=$p95"
@@ -112,12 +91,73 @@ object AiUsageTracker {
     }
 
     /**
-     * Try to extract `usage.input_tokens` + `usage.output_tokens` from
-     * a non-streaming Anthropic response body. Returns (input, output)
-     * pair; (0, 0) on parse failure (silent — caller proceeds without
-     * recording).
+     * Records a 7-column CSV audit row to warp-ai-usage.csv with thread-safety and RFC 4180 escaping.
      */
+    fun recordAudit(
+        context: Context,
+        model: String,
+        inputTokens: Int,
+        outputTokens: Int,
+        latencyMs: Long,
+        commandString: String,
+        approvalState: String
+    ) {
+        synchronized(csvLock) {
+            try {
+                val primaryDir = File("${context.applicationInfo.dataDir}/files/usr/var/log")
+                val logDir = if (primaryDir.exists() || primaryDir.mkdirs()) {
+                    primaryDir
+                } else {
+                    File("${context.applicationInfo.dataDir}/files").also { if (!it.exists()) it.mkdirs() }
+                }
+                val csv = File(logDir, CSV_FILENAME)
+                val isNew = !csv.exists()
+                val escapedCmd = escapeRfc4180(commandString)
+                val timestamp = timestampUtc()
+
+                csv.appendText(
+                    buildString {
+                        if (isNew) {
+                            append("# timestamp,model,input_tokens,output_tokens,latency_ms,command_string,approval_state\n")
+                        }
+                        append(timestamp)
+                        append(',').append(model)
+                        append(',').append(inputTokens)
+                        append(',').append(outputTokens)
+                        append(',').append(latencyMs)
+                        append(',').append(escapedCmd)
+                        append(',').append(approvalState)
+                        append('\n')
+                    }
+                )
+            } catch (e: Throwable) {
+                Log.w(LOG_TAG, "CSV append failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * RFC 4180 double-quote escaping helper.
+     */
+    fun escapeRfc4180(field: String): String {
+        val needsQuotes = field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r')
+        val escaped = field.replace("\"", "\"\"")
+        return if (needsQuotes) "\"$escaped\"" else escaped
+    }
+
     fun parseUsageFromBody(body: String): Pair<Int, Int> {
+        if (body.isBlank()) return 0 to 0
+        try {
+            val inputRegex = Regex(""""input_tokens"\s*:\s*(\d+)""")
+            val outputRegex = Regex(""""output_tokens"\s*:\s*(\d+)""")
+            val inputMatch = inputRegex.find(body)?.groupValues?.get(1)?.toIntOrNull()
+            val outputMatch = outputRegex.find(body)?.groupValues?.get(1)?.toIntOrNull()
+
+            if (inputMatch != null || outputMatch != null) {
+                return (inputMatch ?: 0) to (outputMatch ?: 0)
+            }
+        } catch (_: Throwable) {}
+
         return try {
             val usage = JSONObject(body).optJSONObject("usage") ?: return 0 to 0
             val input = usage.optInt("input_tokens", 0)
@@ -128,7 +168,6 @@ object AiUsageTracker {
         }
     }
 
-    /** Snapshot of cumulative session counters for SettingsActivity display. */
     data class Snapshot(
         val ghostCalls: Long,
         val agentCalls: Long,
@@ -151,7 +190,6 @@ object AiUsageTracker {
         )
     }
 
-    /** Reset session counters (UI button). Does NOT truncate CSV. */
     fun resetSession() {
         sessionInputTokens.set(0)
         sessionOutputTokens.set(0)
@@ -159,51 +197,6 @@ object AiUsageTracker {
         sessionAgentCalls.set(0)
         synchronized(ghostLatencies) { ghostLatencies.clear() }
         synchronized(agentLatencies) { agentLatencies.clear() }
-    }
-
-    private fun appendCsvRow(
-        context: Context,
-        kind: String,
-        model: String,
-        inputTokens: Int,
-        outputTokens: Int,
-        latencyMs: Long
-    ) {
-        // M4-S05 extracted bootstrap puts $PREFIX at this path. If
-        // bootstrap hasn't run (M4-S05 not done OR cleared), skip.
-        val prefix = "${context.applicationInfo.dataDir}/files/usr"
-        val logDir = File("$prefix/var/log")
-        if (!logDir.isDirectory) {
-            // No usable disk log; in-memory counters still useful.
-            return
-        }
-        // Round-3 MEDIUM #5: serialize concurrent appends so two ghost
-        // streams completing within the same millisecond don't interleave
-        // partial rows. The lock is process-local (a single-process app)
-        // so this is effectively zero contention on the hot path.
-        synchronized(csvLock) {
-            try {
-                val csv = File(logDir, CSV_FILENAME)
-                val isNew = !csv.exists()
-                csv.appendText(
-                    buildString {
-                        if (isNew) {
-                            append("# Warp AI usage log (M6-S06)\n")
-                            append("# timestamp,kind,model,input_tokens,output_tokens,latency_ms\n")
-                        }
-                        append(timestampUtc())
-                        append(',').append(kind)
-                        append(',').append(model)
-                        append(',').append(inputTokens)
-                        append(',').append(outputTokens)
-                        append(',').append(latencyMs)
-                        append('\n')
-                    }
-                )
-            } catch (e: Throwable) {
-                Log.w(LOG_TAG, "CSV append failed: ${e.message}")
-            }
-        }
     }
 
     private fun timestampUtc(): String =

@@ -29,7 +29,15 @@
 //!     upstream crates, so cherry-pick velocity for warp_terminal /
 //!     warpui upstream stays unaffected.
 
+pub mod approval;
+pub mod audit;
 pub mod client;
+pub mod profile;
+pub mod provider;
+pub mod session;
+pub mod session_registry;
+
+
 
 #[cfg(test)]
 mod tests {

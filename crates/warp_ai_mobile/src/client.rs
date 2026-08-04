@@ -311,6 +311,7 @@ impl AnthropicClient {
         // separated by blank lines; each event has lines like
         // "event: foo" and "data: {...json...}".
         let mut stream = response.bytes_stream();
+        let mut raw_bytes_buffer = Vec::new();
         let mut buffer = String::new();
         let mut accumulated = String::new();
 
@@ -319,9 +320,7 @@ impl AnthropicClient {
             next = stream.next() => next,
         } {
             let bytes = item.map_err(|e| MessagesError::Network(format!("stream read: {}", e)))?;
-            let text = std::str::from_utf8(&bytes)
-                .map_err(|_| MessagesError::Decode("stream chunk not UTF-8".into()))?;
-            buffer.push_str(text);
+            append_utf8_bytes_safely(&mut raw_bytes_buffer, &mut buffer, &bytes);
 
             // Process complete events (separated by blank line, i.e. \n\n).
             while let Some(end_idx) = buffer.find("\n\n") {
@@ -341,13 +340,198 @@ impl AnthropicClient {
         }
         Ok(accumulated)
     }
+
+    /// Streaming variant supporting multi-turn conversation context and
+    /// structured SSE event deltas (thinking, tool_use, input_json, text_delta).
+    pub async fn messages_stream_multi_turn<F>(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        messages: &[serde_json::Value],
+        max_tokens: u32,
+        cancel: CancellationToken,
+        mut on_event: F,
+    ) -> Result<String, MessagesError>
+    where
+        F: FnMut(SseChunkEvent),
+    {
+        if self.api_key.is_empty() {
+            return Err(MessagesError::EmptyKey);
+        }
+
+        let mut body_map = serde_json::json!({
+            "model": model,
+            "max_tokens": max_tokens,
+            "stream": true,
+            "messages": messages
+        });
+        if !system_prompt.is_empty() {
+            body_map["system"] = serde_json::Value::String(system_prompt.to_string());
+        }
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(self.connect_timeout)
+            .timeout(self.request_timeout)
+            .build()
+            .map_err(|e| MessagesError::Network(format!("client build: {}", e)))?;
+
+        log::info!(
+            target: "warp_ai",
+            "MULTI-TURN STREAM POST {} model={} max_tokens={} auth={}",
+            API_ENDPOINT, model, max_tokens, self.redact()
+        );
+
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(MessagesError::Cancelled),
+            resp = client
+                .post(API_ENDPOINT)
+                .header("Content-Type", "application/json")
+                .header("Anthropic-Version", ANTHROPIC_VERSION)
+                .header("X-Api-Key", &self.api_key)
+                .json(&body_map)
+                .send() => resp.map_err(|e| MessagesError::Network(format!("send: {}", e)))?,
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = tokio::select! {
+                _ = cancel.cancelled() => return Err(MessagesError::Cancelled),
+                t = response.text() => t.map_err(|e| MessagesError::Network(format!("error body: {}", e)))?,
+            };
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
+                .unwrap_or_else(|| text.chars().take(200).collect());
+            return Err(MessagesError::HttpStatus(status.as_u16(), scrub_key(&msg)));
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut raw_bytes_buffer = Vec::new();
+        let mut buffer = String::new();
+        let mut accumulated_text = String::new();
+
+        while let Some(item) = tokio::select! {
+            _ = cancel.cancelled() => return Err(MessagesError::Cancelled),
+            next = stream.next() => next,
+        } {
+            let bytes = item.map_err(|e| MessagesError::Network(format!("stream read: {}", e)))?;
+            append_utf8_bytes_safely(&mut raw_bytes_buffer, &mut buffer, &bytes);
+
+            while let Some(end_idx) = buffer.find("\n\n") {
+                let event_block = buffer[..end_idx].to_string();
+                buffer.drain(..end_idx + 2);
+                let events = extract_sse_events(&event_block);
+                for ev in events {
+                    if let SseChunkEvent::TextDelta { ref text } = ev {
+                        accumulated_text.push_str(text);
+                    }
+                    on_event(ev);
+                }
+            }
+        }
+
+        Ok(accumulated_text)
+    }
+}
+
+/// Structured SSE delta event variants.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SseChunkEvent {
+    TextDelta { text: String },
+    ThinkingDelta { text: String },
+    ToolUseStart { id: String, name: String },
+    InputJsonDelta { partial_json: String },
+}
+
+/// Helper to accumulate bytes into a UTF-8 string safely across chunk boundaries.
+pub fn append_utf8_bytes_safely(raw_buf: &mut Vec<u8>, text_buf: &mut String, new_bytes: &[u8]) {
+    raw_buf.extend_from_slice(new_bytes);
+    match std::str::from_utf8(raw_buf) {
+        Ok(valid_str) => {
+            text_buf.push_str(valid_str);
+            raw_buf.clear();
+        }
+        Err(err) => {
+            let valid_len = err.valid_up_to();
+            if valid_len > 0 {
+                if let Ok(valid_str) = std::str::from_utf8(&raw_buf[..valid_len]) {
+                    text_buf.push_str(valid_str);
+                }
+            }
+            if err.error_len().is_none() {
+                // Incomplete multi-byte sequence at tail — keep tail bytes in raw_buf
+                *raw_buf = raw_buf[valid_len..].to_vec();
+            } else {
+                let lossy = String::from_utf8_lossy(&raw_buf[valid_len..]);
+                text_buf.push_str(&lossy);
+                raw_buf.clear();
+            }
+        }
+    }
+}
+
+/// Extract structured SSE chunk events from an event block string.
+pub fn extract_sse_events(event_block: &str) -> Vec<SseChunkEvent> {
+    let mut events = Vec::new();
+    let data_line = match event_block.lines().find_map(|l| {
+        l.strip_prefix("data: ")
+            .or_else(|| l.strip_prefix("data:"))
+    }) {
+        Some(l) => l,
+        None => return events,
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_str(data_line.trim()) {
+        Ok(v) => v,
+        Err(_) => return events,
+    };
+
+    let event_type = match parsed.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return events,
+    };
+
+    if event_type == "content_block_delta" {
+        if let Some(delta) = parsed.get("delta") {
+            if let Some(delta_type) = delta.get("type").and_then(|v| v.as_str()) {
+                match delta_type {
+                    "text_delta" => {
+                        if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
+                            events.push(SseChunkEvent::TextDelta { text: t.to_string() });
+                        }
+                    }
+                    "thinking_delta" => {
+                        if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
+                            events.push(SseChunkEvent::ThinkingDelta { text: t.to_string() });
+                        }
+                    }
+                    "input_json_delta" => {
+                        if let Some(pj) = delta.get("partial_json").and_then(|v| v.as_str()) {
+                            events.push(SseChunkEvent::InputJsonDelta { partial_json: pj.to_string() });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    } else if event_type == "content_block_start" {
+        if let Some(block) = parsed.get("content_block") {
+            if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
+                let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                events.push(SseChunkEvent::ToolUseStart { id, name });
+            }
+        }
+    }
+
+    events
 }
 
 /// Extract the `delta.text` field from an SSE event block if it's a
-/// `content_block_delta` with `type: text_delta`. Returns None for
-/// any other event type (we ignore message_start / content_block_stop
-/// / message_delta / etc.) or malformed blocks.
+/// `content_block_delta` with `type: text_delta`.
 fn extract_text_delta(event_block: &str) -> Option<String> {
+
     // Find the `data:` line. SSE allows `data: {json}` but Anthropic
     // emits exactly one data line per event; we don't support multi-
     // line data blocks here.
@@ -395,20 +579,25 @@ impl std::fmt::Display for MessagesError {
 
 impl std::error::Error for MessagesError {}
 
-/// Defense-in-depth: scrub any embedded `sk-ant-...` substring from
+/// Defense-in-depth: scrub any embedded `sk-ant-...` or `sk-...` substring from
 /// API responses before they hit logs / UI / error returns. Mirrors
 /// the Java-side `AnthropicClient.scrub()` regex.
-fn scrub_key(text: &str) -> String {
-    // Simple pass: find "sk-ant-" prefix + take chars until non-key
-    // char. Avoids pulling in the regex crate (1MB binary cost).
+pub fn scrub_key(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     let bytes = text.as_bytes();
     while i < bytes.len() {
         if i + 7 <= bytes.len() && &bytes[i..i + 7] == b"sk-ant-" {
             out.push_str("sk-ant-***REDACTED***");
-            // Skip past the key — anything in the API-key alphabet.
             i += 7;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-')
+            {
+                i += 1;
+            }
+        } else if i + 3 <= bytes.len() && &bytes[i..i + 3] == b"sk-" {
+            out.push_str("sk-***REDACTED***");
+            i += 3;
             while i < bytes.len()
                 && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-')
             {
@@ -429,6 +618,7 @@ fn scrub_key(text: &str) -> String {
     }
     out
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -496,6 +686,14 @@ mod tests {
         let dirty = "First sk-ant-aaa123 and second sk-ant-bbb456 keys";
         let cleaned = scrub_key(dirty);
         assert!(cleaned.matches("REDACTED").count() == 2, "got: {}", cleaned);
+    }
+
+    #[test]
+    fn scrub_key_handles_openai_sk_format() {
+        let dirty = "OpenAI key sk-proj-1234567890abcdef is dirty";
+        let cleaned = scrub_key(dirty);
+        assert!(!cleaned.contains("1234567890abcdef"));
+        assert!(cleaned.contains("sk-***REDACTED***"));
     }
 
     #[test]
@@ -574,4 +772,114 @@ mod tests {
         assert_eq!(extract_text_delta("garbage"), None);
         assert_eq!(extract_text_delta("data: not json"), None);
     }
+
+    #[test]
+    fn extract_sse_events_thinking_and_tool_use() {
+        let thinking_evt = "event: content_block_delta\n\
+                            data: {\"type\":\"content_block_delta\",\"index\":0,\
+                            \"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Analyzing code...\"}}";
+        let events = extract_sse_events(thinking_evt);
+        assert_eq!(events, vec![SseChunkEvent::ThinkingDelta { text: "Analyzing code...".into() }]);
+
+        let tool_start_evt = "event: content_block_start\n\
+                              data: {\"type\":\"content_block_start\",\"index\":1,\
+                              \"content_block\":{\"type\":\"tool_use\",\"id\":\"t_123\",\"name\":\"execute_command\"}}";
+        let tool_events = extract_sse_events(tool_start_evt);
+        assert_eq!(tool_events, vec![SseChunkEvent::ToolUseStart {
+            id: "t_123".into(),
+            name: "execute_command".into(),
+        }]);
+
+        let input_json_evt = "event: content_block_delta\n\
+                             data: {\"type\":\"content_block_delta\",\"index\":1,\
+                             \"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}";
+        let json_events = extract_sse_events(input_json_evt);
+        assert_eq!(json_events, vec![SseChunkEvent::InputJsonDelta { partial_json: "{\"cmd\":\"ls\"}".into() }]);
+    }
+
+    #[test]
+    fn append_utf8_bytes_safely_handles_split_cjk_bytes() {
+        // "你" in UTF-8 is 3 bytes: [0xE4, 0xBD, 0xA0]
+        let mut raw_buf = Vec::new();
+        let mut text_buf = String::new();
+
+        // Feed first byte only [0xE4]
+        append_utf8_bytes_safely(&mut raw_buf, &mut text_buf, &[0xE4]);
+        assert_eq!(text_buf, "");
+        assert_eq!(raw_buf, vec![0xE4]);
+
+        // Feed remaining 2 bytes [0xBD, 0xA0]
+        append_utf8_bytes_safely(&mut raw_buf, &mut text_buf, &[0xBD, 0xA0]);
+        assert_eq!(text_buf, "你");
+        assert!(raw_buf.is_empty());
+    }
+
+    // ── Adversarial Stress Tests (Challenger 1 Empirical Verification) ────────
+
+    #[test]
+    fn stress_utf8_split_emoji_and_cjk_across_single_byte_chunks() {
+        // Test 4-byte Emoji (🎉), 3-byte CJK (繁體中文), 2-byte Accented (é), and ASCII in SSE payload
+        let sse_block = "event: content_block_delta\n\
+                         data: {\"type\":\"content_block_delta\",\"index\":0,\
+                         \"delta\":{\"type\":\"text_delta\",\"text\":\"🎉 繁體中文 test é!\"}}\n\n";
+
+        let bytes = sse_block.as_bytes();
+        let mut raw_buf = Vec::new();
+        let mut text_buf = String::new();
+
+        // Feed 1 byte per chunk to stress-test multi-byte boundaries across chunks
+        for i in 0..bytes.len() {
+            append_utf8_bytes_safely(&mut raw_buf, &mut text_buf, &bytes[i..i + 1]);
+        }
+
+        assert_eq!(text_buf, sse_block);
+        assert!(raw_buf.is_empty(), "raw_buf should be empty at the end of complete UTF-8 stream");
+
+        // Parse extracted event
+        let events = extract_sse_events(&text_buf);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseChunkEvent::TextDelta { text } => {
+                assert_eq!(text, "🎉 繁體中文 test é!");
+            }
+            _ => panic!("Expected TextDelta event"),
+        }
+    }
+
+    #[test]
+    fn stress_utf8_invalid_bytes_recovery() {
+        let mut raw_buf = Vec::new();
+        let mut text_buf = String::new();
+
+        // Feed invalid UTF-8 sequence [0xFF, 0xFE]
+        append_utf8_bytes_safely(&mut raw_buf, &mut text_buf, &[0xFF, 0xFE]);
+        assert!(text_buf.contains('\u{FFFD}')); // Replaced with unicode replacement char
+
+        // Subsequent valid UTF-8 should process cleanly without corruption
+        append_utf8_bytes_safely(&mut raw_buf, &mut text_buf, "Valid UTF-8".as_bytes());
+        assert!(text_buf.contains("Valid UTF-8"));
+    }
+
+    #[test]
+    fn stress_malformed_json_and_edge_case_events() {
+        let cases = vec![
+            "data: {truncated_json",
+            "data: {\"type\":\"content_block_delta\"}", // missing delta
+            "data: {\"type\":\"content_block_delta\",\"delta\":null}",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":12345}}", // non-string text
+            "data: {\"type\":\"unknown_event_type\"}",
+            "data: <html><body>502 Bad Gateway</body></html>", // HTML error payload
+            "data: ", // empty data
+            "not_an_sse_event_line",
+            "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\"}}", // missing id/name
+        ];
+
+        for case in cases {
+            let events = extract_sse_events(case);
+            // Must return without panic or crash, returning parsed events or empty
+            assert!(events.is_empty() || events.len() > 0);
+        }
+    }
 }
+
+

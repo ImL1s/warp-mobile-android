@@ -1,0 +1,86 @@
+Starting a Gradle Daemon, 3 busy and 202 stopped Daemons could not be reused, use --status for details
+Configuration on demand is an incubating feature.
+WARNING: We recommend using a newer Android Gradle plugin to use compileSdk = 36
+
+This Android Gradle plugin (8.3.2) was tested up to compileSdk = 34.
+
+You are strongly encouraged to update your project to use a newer
+Android Gradle plugin that has been tested with compileSdk = 36.
+
+If you are already using the latest version of the Android Gradle plugin,
+you may need to wait until a newer version with support for compileSdk = 36 is available.
+
+Warning: SDK processing. This version only understands SDK XML versions up to 3 but an SDK XML file of version 4 was encountered. This can happen if you use versions of Android Studio and the command-line tools that were released at different times.
+To suppress this warning, add/update
+    android.suppressUnsupportedCompileSdk=36
+to this project's gradle.properties.
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:mergeDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:processDebugMainManifest UP-TO-DATE
+> Task :app:processDebugManifest UP-TO-DATE
+> Task :app:processDebugManifestForPackage UP-TO-DATE
+> Task :app:processDebugResources UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac NO-SOURCE
+> Task :app:bundleDebugClassesToRuntimeJar UP-TO-DATE
+> Task :app:bundleDebugClassesToCompileJar UP-TO-DATE
+> Task :app:compileDebugUnitTestKotlin UP-TO-DATE
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
+> Task :app:javaPreCompileDebugUnitTest UP-TO-DATE
+> Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:mergeDebugShaders UP-TO-DATE
+> Task :app:compileDebugShaders NO-SOURCE
+
+> Task :app:verifyBootstrapZip
+verifyBootstrapZip: zip+metadata pair verified (size=1430, sha256=3200a0c0671cf53098cc9bac1e7522d4601fa89fc45deee1d0b7d67490a82561)
+
+> Task :app:copyBootstrapZip UP-TO-DATE
+
+> Task :app:syncCompanionSources
+HEAD is now at 0f704db warp-mobile/iter40: per-script Family routing for CJK/emoji chars
+HEAD is now at 398740dfd2 packages/doxygen: update SHA256 for GitHub-regenerated 1.17.0 tarball
+
+> Task :app:verifyCompanionSourcesSha
+verifyCompanionSourcesSha: warp-src commit verified (0f704dbed0ece066a7d56ee0573c6e3f5cedd6ee)
+verifyCompanionSourcesSha: termux-packages commit verified (398740dfd23637085083f3976baeb3872c06cc45)
+verifyCompanionSourcesSha: zsh_body.sh SHA-256 verified (70c5f637d09e0c494cb1dc1fbb4668c158b42f27310fcc833637e981bc656347)
+
+> Task :app:verifyZshBodySh
+> Task :app:copyWarpAssets UP-TO-DATE
+> Task :app:extractTermuxBinariesAsLibsDebug UP-TO-DATE
+> Task :app:generateBootstrapVersion UP-TO-DATE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets UP-TO-DATE
+> Task :app:packageDebugUnitTestForUnitTest UP-TO-DATE
+> Task :app:generateDebugUnitTestConfig UP-TO-DATE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:processDebugUnitTestJavaRes UP-TO-DATE
+
+> Task :app:testDebugUnitTest FAILED
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:testDebugUnitTest'.
+> java.io.IOException: Unable to delete directory 'D:\OtherProject\mine\warp-mobile-android\android\app\build\test-results\testDebugUnitTest\binary'
+    Failed to delete some children. This might happen because a process has files open or has its working directory set in the target directory.
+    - D:\OtherProject\mine\warp-mobile-android\android\app\build\test-results\testDebugUnitTest\binary\output.bin
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 12s
+35 actionable tasks: 6 executed, 29 up-to-date

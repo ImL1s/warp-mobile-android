@@ -1,6 +1,6 @@
 name: Release (v* tag)
 
-# v1-release prep: triggered by pushing a tag matching `v*` (e.g. v0.6.0-m6).
+# v1-release prep: triggered by pushing a tag matching `v*` (e.g. v1.0.0).
 # Builds release APK + bootstrap zip, generates SHA256SUMS, creates a
 # GitHub Release with the artifacts attached.
 #
@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 0.6.0-m6) — without the 'v' prefix"
+        description: "Version (e.g. 1.0.0) — without the 'v' prefix"
         required: true
         type: string
 
@@ -38,6 +38,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0   # for `git describe --tags`
+          submodules: recursive
 
       - name: Resolve version
         id: version
@@ -46,7 +47,7 @@ jobs:
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
             echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            # tag ref like refs/tags/v0.6.0-m6 -> 0.6.0-m6
+            # tag ref like refs/tags/v1.0.0 -> 1.0.0
             VERSION="${GITHUB_REF#refs/tags/v}"
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
@@ -87,19 +88,9 @@ jobs:
           # following step (the path is well-known + deterministic).
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/29.0.13113456" >> "$GITHUB_ENV"
 
-      - name: Clone warp-src + termux-packages forks + render Cargo config
-        # Clone INTO the repo root (NOT ../). The cargo path deps in
-        # crates/android-host/Cargo.toml are `../../warp-src/...` which
-        # from crates/android-host/ resolves to <repo_root>/warp-src/.
-        # F-Droid recipe uses `../` because it runs from subdir: android;
-        # GHA checkout sits at repo root by default.
-        # MUST run AFTER NDK install — setup-cargo-config.sh validates
-        # the NDK toolchain path exists.
+      - name: Sync companion sources + render Cargo config
         run: |
-          git clone https://github.com/ImL1s/warp warp-src \
-            --branch warp-mobile/m0-facade --depth 1
-          git clone https://github.com/ImL1s/termux-packages termux-packages \
-            --branch warp-mobile/main --depth 1
+          bash tools/scripts/setup-companion-sources.sh
           bash tools/scripts/setup-cargo-config.sh
 
       - name: Decode keystore (if signing secrets present)

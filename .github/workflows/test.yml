@@ -65,18 +65,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Clone warp-src fork
-        # Clone INTO the repo root at warp-src/ (not ../warp-src). The
-        # cargo path dep in crates/android-host/Cargo.toml is
-        # `../../warp-src/...` which resolves to <repo_root>/warp-src/.
-        # The F-Droid recipe clones to `../warp-src` because its build
-        # runs from `subdir: android`, so its `../` IS the repo root —
-        # but GHA checkout sits at the repo root by default, so we drop
-        # the `../`.
-        run: |
-          git clone https://github.com/ImL1s/warp warp-src \
-            --branch warp-mobile/m0-facade --depth 1
+      - name: Sync & verify companion sources
+        run: bash tools/scripts/setup-companion-sources.sh
 
       # NOTE: this job does NOT call tools/scripts/setup-cargo-config.sh.
       # That script renders .cargo/config.toml from a template using
@@ -156,11 +149,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-      - name: Clone warp-src fork
-        run: |
-          git clone https://github.com/ImL1s/warp warp-src \
-            --branch warp-mobile/m0-facade --depth 1
+      - name: Sync & verify companion sources
+        run: bash tools/scripts/setup-companion-sources.sh
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
