@@ -132,7 +132,13 @@ jobs:
       # from warp-src's manifest avoids this cross-workspace issue.
 
       - name: Test warp_ai_mobile (45 tests)
-        run: cargo test --manifest-path crates/warp_ai_mobile/Cargo.toml --no-fail-fast
+        # Cargo always resolves the full workspace graph, which fails
+        # due to android-host -> warp-src cross-workspace dep. Copy the
+        # standalone crate to /tmp to isolate it from the workspace.
+        run: |
+          cp -r crates/warp_ai_mobile /tmp/warp_ai_mobile_test
+          cd /tmp/warp_ai_mobile_test
+          cargo test --no-fail-fast
 
       - name: Test warp_terminal_mobile_facade (~89 tests)
         run: |
