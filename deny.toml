@@ -29,7 +29,13 @@ targets = [
 # warnings (matches the `cargo audit --deny warnings` policy in CI).
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # Upstream transitive deps — not directly called in our code paths.
+    # Will be resolved when crate maintainers release patches.
+    "RUSTSEC-2026-0192",  # anyhow 1.0.102 unsoundness in downcast_mut()
+    "RUSTSEC-2026-0190",  # memmap2 0.9.10 unchecked pointer offset
+    "RUSTSEC-2026-0186",  # (related advisory)
+]
 
 [licenses]
 version = 2

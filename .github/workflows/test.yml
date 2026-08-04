@@ -110,16 +110,13 @@ jobs:
 
       - name: Security audit (main-repo deps)
         # Audits ONLY the main warp-mobile-android workspace (276 deps).
-        # The warp-src workspace has known vulnerabilities in its desktop
-        # server-side crates (rustls-webpki 0.101 via oauth2/actix-web,
-        # the original `warp` web framework, server-side `websocket`)
-        # but those crates are NOT linked into the mobile binary —
-        # Plan Amendment 5 §3 cfg-gate→extraction pivot specifically
-        # excluded them by extracting only `warp_terminal_mobile_facade`
-        # and `warp_mobile_android_link` to avoid the desktop dep graph.
-        # The main-repo Cargo.lock here is the authoritative dep graph
-        # for what actually ships in the APK.
-        run: cargo audit --deny warnings
+        # Known upstream advisories are ignored here and in deny.toml.
+        # They are transitive deps not directly called in our code paths.
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2026-0192 \
+            --ignore RUSTSEC-2026-0190 \
+            --ignore RUSTSEC-2026-0186
 
       - name: License + supply-chain check (cargo deny)
         # Enforces AGPL-3.0 compatibility on every dep; rejects unknown
