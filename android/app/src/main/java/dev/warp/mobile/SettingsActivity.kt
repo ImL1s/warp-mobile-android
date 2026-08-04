@@ -6,68 +6,83 @@ import android.text.method.PasswordTransformationMethod
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import dev.warp.mobile.ai.ModelProfile
+import dev.warp.mobile.ai.ModelProfileRepository
+import dev.warp.mobile.ai.ProviderKind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * M6-S02: BYOK SettingsActivity.
- *
- * Minimal one-screen settings UI:
- *   - EditText for the Anthropic API key (password-masked)
- *   - Save button: writes to AiKeyStore (EncryptedSharedPreferences)
- *   - Test Connection button: posts a 1-token Haiku completion to
- *     /v1/messages and surfaces the result (Ok / HttpError(401) /
- *     NetworkError) as a Toast + status TextView
- *   - Clear button: forgets the saved key
- *
- * No XML layouts (zero AndroidX nav / Compose deps). Programmatic
- * LinearLayout vertical for build-cycle simplicity. M6-S04 will add
- * a richer Compose-based settings screen if needed.
- *
- * Trigger: launched via `am start -n dev.warp.mobile/.SettingsActivity`
- * from the launcher. (M6-S03 will add a settings icon overlay in the
- * MainActivity AccessoryRow.)
+ * BYOK SettingsActivity & Model Profile Selector (Issue #15 update).
  */
 class SettingsActivity : AppCompatActivity() {
     private val LOG_TAG = "WarpSettings"
+    private lateinit var modelSpinner: Spinner
     private lateinit var keyInput: EditText
+    private lateinit var openAiKeyInput: EditText
     private lateinit var statusText: TextView
-    /** M6-S06: cumulative-tokens display TextView (refreshed after Test). */
     private lateinit var usageText: TextView
+
+    private var currentProfiles: List<ModelProfile> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // M6 round-2 security review HIGH #1: FLAG_SECURE prevents OS
-        // screenshots, screen recordings, and cast/mirror surfaces from
-        // capturing the API key field. Set BEFORE setContentView so it
-        // applies to every frame the window renders.
-        // Refs: https://developer.android.com/reference/android/view/WindowManager.LayoutParams#FLAG_SECURE
         window.setFlags(
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE
         )
-        // Don't show keyboard input by default — user can tap to focus.
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN)
 
-        title = "Warp AI · BYOK Settings"
+        title = "Warp AI · Model Profiles & BYOK Settings"
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
 
-        root.addView(label("Anthropic API key (BYOK)"))
+        // Model Profile Selector
+        root.addView(label("Active Model Profile"))
+        modelSpinner = Spinner(this)
+        root.addView(modelSpinner, lpMatchWrap())
+
+        currentProfiles = ModelProfileRepository.getAllProfiles(this)
+        val profileNames = currentProfiles.map { "${it.name} (${it.provider.name.lowercase()})" }
+        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, profileNames)
+        modelSpinner.adapter = adapter
+
+        val activeProfile = ModelProfileRepository.getActiveProfile(this)
+        val activeIndex = currentProfiles.indexOfFirst { it.id == activeProfile.id }
+        if (activeIndex >= 0) {
+            modelSpinner.setSelection(activeIndex)
+        }
+
+        modelSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                if (position in currentProfiles.indices) {
+                    val selected = currentProfiles[position]
+                    ModelProfileRepository.setActiveProfileId(this@SettingsActivity, selected.id)
+                    setStatus("Active model profile: ${selected.name}")
+                }
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // Key Inputs for Anthropic & OpenAI
+        root.addView(label("Anthropic API Key (sk-ant-...)"))
         keyInput = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             transformationMethod = PasswordTransformationMethod.getInstance()
@@ -77,24 +92,28 @@ class SettingsActivity : AppCompatActivity() {
         }
         root.addView(keyInput, lpMatchWrap())
 
-        // Load existing key (background thread because Keystore key
-        // generation can take ~100-300ms on first call).
-        // M6 round-2 code-review HIGH #2: lifecycleScope (not GlobalScope)
-        // so the coroutine cancels when SettingsActivity is destroyed.
-        // Without this, a background load that completed AFTER user pressed
-        // back would write to a destroyed Activity's Views.
+        root.addView(label("OpenAI API Key (sk-...)"))
+        openAiKeyInput = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            transformationMethod = PasswordTransformationMethod.getInstance()
+            hint = "sk-..."
+            setSingleLine(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+        }
+        root.addView(openAiKeyInput, lpMatchWrap())
+
         lifecycleScope.launch(Dispatchers.IO) {
-            val existing = try {
-                AiKeyStore.load(this@SettingsActivity)
-            } catch (e: Throwable) {
-                Log.e(LOG_TAG, "AiKeyStore load failed: ${e.message}")
-                null
-            }
+            val anthropicKey = try { AiKeyStore.load(this@SettingsActivity, "anthropic") } catch (_: Throwable) { null }
+            val openAiKey = try { AiKeyStore.load(this@SettingsActivity, "openai") } catch (_: Throwable) { null }
+
             withContext(Dispatchers.Main) {
-                if (!existing.isNullOrEmpty()) {
-                    keyInput.setText(existing)
-                    setStatus("Loaded saved key (${AiKeyStore.redact(existing)})")
+                if (!anthropicKey.isNullOrEmpty()) {
+                    keyInput.setText(anthropicKey)
                 }
+                if (!openAiKey.isNullOrEmpty()) {
+                    openAiKeyInput.setText(openAiKey)
+                }
+                setStatus("Keys loaded (${AiKeyStore.redact(anthropicKey)}, ${AiKeyStore.redact(openAiKey)})")
             }
         }
 
@@ -115,12 +134,10 @@ class SettingsActivity : AppCompatActivity() {
         }
         root.addView(statusText, lpMatchWrap())
 
-        // M6-S06 cumulative-tokens display.
         usageText = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setTextColor(0xFFCCCCCC.toInt())
-            setPadding(0, dp(20), 0, dp(8))
-            // monospace so the number columns line up
+            setPadding(0, dp(16), 0, dp(8))
             typeface = android.graphics.Typeface.MONOSPACE
         }
         root.addView(usageText, lpMatchWrap())
@@ -133,15 +150,14 @@ class SettingsActivity : AppCompatActivity() {
         }
         root.addView(resetBtn, lpMatchWrap())
 
-        // Cost-warning footer per Death-pit #3 in M6-kickoff-confirmed.md
         val costWarning = TextView(this).apply {
-            text = "Costs (Anthropic public pricing 2026-Q2):\n" +
-                "  Ghost-text via Haiku: ~\$0.005 per completion\n" +
-                "  Agent task via Sonnet: ~\$0.05 per task\n" +
-                "Heavy use can cost \$1-5/day."
+            text = "Costs & Model Profiles (2026):\n" +
+                "  • Claude 3.5 Sonnet: ~\$0.05 per agent turn\n" +
+                "  • GPT-4o / GPT-4o Mini: OpenAI compatible\n" +
+                "  • Ollama Local: Custom endpoint (http://10.0.2.2:11434)"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(0xFF888888.toInt())
-            setPadding(0, dp(20), 0, 0)
+            setPadding(0, dp(16), 0, 0)
         }
         root.addView(costWarning, lpMatchWrap())
 
@@ -150,29 +166,28 @@ class SettingsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Refresh in case usage changed via other paths (PTY-side AI
-        // calls in AccessoryRow update the same singleton).
         if (::usageText.isInitialized) {
             refreshUsageDisplay()
         }
     }
 
     private fun onSave() {
-        val key = keyInput.text.toString().trim()
-        if (key.isEmpty()) {
-            setStatus("Empty key — nothing saved")
-            return
-        }
+        val antKey = keyInput.text.toString().trim()
+        val oaiKey = openAiKeyInput.text.toString().trim()
+
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                AiKeyStore.save(this@SettingsActivity, key)
-                Log.i(LOG_TAG, "Saved key (${AiKeyStore.redact(key)})")
+                if (antKey.isNotEmpty()) {
+                    AiKeyStore.save(this@SettingsActivity, "anthropic", antKey)
+                }
+                if (oaiKey.isNotEmpty()) {
+                    AiKeyStore.save(this@SettingsActivity, "openai", oaiKey)
+                }
                 withContext(Dispatchers.Main) {
-                    setStatus("Saved (${AiKeyStore.redact(key)})")
-                    Toast.makeText(this@SettingsActivity, "API key saved", Toast.LENGTH_SHORT).show()
+                    setStatus("Keys saved (Anthropic: ${AiKeyStore.redact(antKey)}, OpenAI: ${AiKeyStore.redact(oaiKey)})")
+                    Toast.makeText(this@SettingsActivity, "API Keys saved", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Throwable) {
-                Log.e(LOG_TAG, "save failed: ${e.message}")
                 withContext(Dispatchers.Main) {
                     setStatus("Save failed: ${e.message}")
                 }
@@ -183,11 +198,12 @@ class SettingsActivity : AppCompatActivity() {
     private fun onClear() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
-                AiKeyStore.clear(this@SettingsActivity)
+                AiKeyStore.clearAll(this@SettingsActivity)
                 withContext(Dispatchers.Main) {
                     keyInput.setText("")
-                    setStatus("Cleared")
-                    Toast.makeText(this@SettingsActivity, "API key cleared", Toast.LENGTH_SHORT).show()
+                    openAiKeyInput.setText("")
+                    setStatus("All API keys cleared")
+                    Toast.makeText(this@SettingsActivity, "API keys cleared", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Throwable) {
                 Log.e(LOG_TAG, "clear failed: ${e.message}")
@@ -196,72 +212,65 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun onTest() {
-        val key = keyInput.text.toString().trim()
-        if (key.isEmpty()) {
-            setStatus("Enter a key before testing")
+        val active = ModelProfileRepository.getActiveProfile(this)
+        val key = when (active.provider) {
+            ProviderKind.ANTHROPIC -> keyInput.text.toString().trim()
+            ProviderKind.OPENAI -> openAiKeyInput.text.toString().trim()
+            ProviderKind.CUSTOM_OPENAI -> openAiKeyInput.text.toString().trim()
+        }
+
+        if (active.provider != ProviderKind.CUSTOM_OPENAI && key.isEmpty()) {
+            setStatus("Enter API key for ${active.provider.name} before testing")
             return
         }
-        // M6-S05: short-circuit when offline.
+
         if (!AiConnectivity.get(this).isOnline()) {
-            setStatus("✗ No network — turn off airplane mode and retry")
+            setStatus("✗ No network — retry connection")
             return
         }
-        setStatus("Testing /v1/messages with model claude-haiku-4-5...")
+
+        setStatus("Testing profile ${active.name} (${active.modelName})...")
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = AnthropicClient.testConnection(key)
+            val result = AnthropicClient.testConnection(if (key.isEmpty()) "custom-local" else key)
             withContext(Dispatchers.Main) {
                 val msg = when (result) {
                     is AnthropicClient.TestResult.Ok -> {
-                        // M6-S06: record telemetry for the Test
-                        // Connection call. `kind=ghost` because
-                        // Test Connection uses the same Haiku
-                        // model + 1-token budget.
                         AiUsageTracker.record(
                             this@SettingsActivity,
                             kind = "ghost",
-                            model = "claude-haiku-4-5",
+                            model = active.modelName,
                             inputTokens = result.inputTokens,
                             outputTokens = result.outputTokens,
                             latencyMs = result.latencyMs
                         )
-                        "✓ OK (${result.latencyMs} ms, in=${result.inputTokens} out=${result.outputTokens} tokens): \"${result.responseText.take(50)}\""
+                        "✓ OK (${result.latencyMs} ms, in=${result.inputTokens} out=${result.outputTokens} tokens)"
                     }
-                    is AnthropicClient.TestResult.HttpError ->
-                        "✗ HTTP ${result.code}: ${result.message.take(120)}"
-                    is AnthropicClient.TestResult.NetworkError ->
-                        "✗ Network: ${result.message.take(120)}"
-                    AnthropicClient.TestResult.MissingKey ->
-                        "✗ Missing or empty key"
+                    is AnthropicClient.TestResult.HttpError -> "✗ HTTP ${result.code}: ${result.message.take(80)}"
+                    is AnthropicClient.TestResult.NetworkError -> "✗ Network: ${result.message.take(80)}"
+                    AnthropicClient.TestResult.MissingKey -> "✗ Missing or empty key"
                 }
                 setStatus(msg)
                 refreshUsageDisplay()
-                Log.i(LOG_TAG, "test result: $msg")
             }
         }
     }
 
-    /**
-     * M6-S06: update the cumulative-tokens TextView at the bottom of
-     * Settings. Called after every successful Test Connection + on
-     * activity resume. Reads from AiUsageTracker.snapshot().
-     */
     private fun refreshUsageDisplay() {
         val s = AiUsageTracker.snapshot()
+        val active = ModelProfileRepository.getActiveProfile(this)
         usageText.text = buildString {
+            append("Active Profile: ${active.name} (${active.modelName})\n")
             append("Session usage (since launch):\n")
-            append("  Ghost calls:  ${s.ghostCalls}  (p95 latency ${s.ghostP95Ms}ms; cap 500ms)\n")
-            append("  Agent calls:  ${s.agentCalls}  (p95 latency ${s.agentP95Ms}ms; cap 8000ms)\n")
+            append("  Ghost calls:  ${s.ghostCalls}  (p95 latency ${s.ghostP95Ms}ms)\n")
+            append("  Agent calls:  ${s.agentCalls}  (p95 latency ${s.agentP95Ms}ms)\n")
             append("  Input tokens: ${s.inputTokens}\n")
-            append("  Output tokens: ${s.outputTokens}\n")
-            append("  Reset session counters with the button below.")
+            append("  Output tokens: ${s.outputTokens}")
         }
     }
 
     private fun setStatus(text: String) {
         statusText.text = text
     }
-
-    // ── view helpers ────────────────────────────────────────────────
 
     private fun label(text: String): TextView = TextView(this).apply {
         this.text = text

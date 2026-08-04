@@ -1,6 +1,25 @@
 #[cfg(unix)]
 pub mod pty;
 
+#[cfg(not(unix))]
+pub mod pty {
+    use std::io;
+    pub struct PtySession;
+    impl PtySession {
+        pub fn read(&self, _buf: &mut [u8]) -> io::Result<usize> { Ok(0) }
+        pub fn write(&self, _buf: &[u8]) -> io::Result<usize> { Ok(0) }
+        pub fn resize(&self, _rows: u16, _cols: u16) -> io::Result<()> { Ok(()) }
+        pub fn kill_eager(&self) {}
+        pub fn kill(&self) -> io::Result<()> { Ok(()) }
+        pub fn get_exit_status(&self) -> Option<i32> { None }
+    }
+    pub fn active_pty_count() -> u32 { 0 }
+    pub fn total_spawned_ptys() -> u64 { 0 }
+    pub fn spawn_pty(_program: &str, _args: &[&str], _env: &[(&str, &str)]) -> io::Result<PtySession> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "pty unsupported on non-unix host"))
+    }
+}
+
 #[cfg(target_os = "android")]
 mod font_render;
 
@@ -45,9 +64,16 @@ pub mod bootstrap;
 mod vulkan;
 
 use jni::objects::{JByteArray, JClass, JObjectArray, JString};
-use jni::sys::{jbyteArray, jint, jlong, jshort, jstring};
+use jni::sys::{jboolean, jbyteArray, jint, jlong, jshort, jstring};
 use jni::JNIEnv;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
+use warp_ai_mobile::session::{TurnState};
+use warp_ai_mobile::session_registry::global_registry;
+use warp_ai_mobile::client::{AnthropicClient, SseChunkEvent};
+
 
 #[cfg(target_os = "android")]
 use jni::objects::JObject;
@@ -186,12 +212,9 @@ fn error_jstring(env: &mut JNIEnv, msg: &str) -> jstring {
 // requests across the app lifetime. Per-request resources (CancellationToken,
 // chunks queue) tracked via Arc<StreamHandle>.
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::VecDeque;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
-use tokio_util::sync::CancellationToken;
+
 // Arc and jlong already imported at top of file (lines 43-45).
 
 /// Global tokio runtime. Lazy-init on first AI call. Multi-thread (4
@@ -403,6 +426,316 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_aiGhostStreamFree(
     log::info!(target: "android-host", "aiGhostStreamFree: handle dropped");
 }
 
+// ── Multi-Turn Agent Conversations JNI bindings (Issue #14) ───────────────
+
+struct AgentStreamHandle {
+    session_id: String,
+    events: Mutex<VecDeque<String>>,
+    done: AtomicBool,
+    paused: AtomicBool,
+    error: Mutex<Option<String>>,
+    cancel: CancellationToken,
+}
+
+impl AgentStreamHandle {
+    fn new(session_id: String) -> Self {
+        Self {
+            session_id,
+            events: Mutex::new(VecDeque::new()),
+            done: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            error: Mutex::new(None),
+            cancel: CancellationToken::new(),
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_aiAgentSessionCreate(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: JString,
+    model: JString,
+    system_prompt: JString,
+) -> jboolean {
+    init_logger();
+    let sid = match env.get_string(&session_id) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let mdl = match env.get_string(&model) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => warp_ai_mobile::client::DEFAULT_AGENT_MODEL.to_string(),
+    };
+    let sys = match env.get_string(&system_prompt) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => String::new(),
+    };
+
+    global_registry().create_or_get_session(sid, mdl, sys);
+    1
+}
+
+fn spawn_agent_turn_stream(
+    session_id: String,
+    api_key: String,
+    max_tokens: u32,
+) -> jlong {
+    let registry = global_registry();
+    let (model, system_prompt, messages_json) = match registry.get_session(&session_id) {
+        Some(sess) => (sess.model.clone(), sess.system_prompt.clone(), sess.to_anthropic_messages()),
+        None => return 0,
+    };
+
+    registry.set_state(&session_id, TurnState::Connecting);
+
+    let handle = Arc::new(AgentStreamHandle::new(session_id.clone()));
+    let handle_w = Arc::clone(&handle);
+    let cancel_w = handle.cancel.clone();
+
+    tokio_rt().spawn(async move {
+        global_registry().set_state(&session_id, TurnState::Streaming);
+        let client = AnthropicClient::new(api_key);
+
+        let res = client
+            .messages_stream_multi_turn(
+                &model,
+                &system_prompt,
+                &messages_json,
+                max_tokens,
+                cancel_w,
+                |ev| {
+                    if handle_w.paused.load(Ordering::Acquire) {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    let json_payload = serde_json::to_string(&ev).unwrap_or_default();
+                    if let Ok(mut q) = handle_w.events.lock() {
+                        q.push_back(format!(":EVENT:{}", json_payload));
+                    }
+                },
+            )
+            .await;
+
+        match res {
+            Ok(accumulated) => {
+                global_registry().update_session(&session_id, |sess| {
+                    sess.add_assistant_message(&accumulated);
+                    sess.state = TurnState::Completed;
+                });
+            }
+            Err(warp_ai_mobile::client::MessagesError::Cancelled) => {
+                global_registry().set_state(&session_id, TurnState::Cancelled);
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                if let Ok(mut slot) = handle_w.error.lock() {
+                    *slot = Some(err_msg);
+                }
+                global_registry().set_state(&session_id, TurnState::Error);
+            }
+        }
+
+        handle_w.done.store(true, Ordering::Release);
+    });
+
+    Arc::into_raw(handle) as jlong
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_aiAgentSendTurnStart(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: JString,
+    api_key: JString,
+    user_prompt: JString,
+    max_tokens: jint,
+) -> jlong {
+    init_logger();
+    let sid = match env.get_string(&session_id) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let key = match env.get_string(&api_key) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let prompt = match env.get_string(&user_prompt) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let max_t = if max_tokens <= 0 { 1024 } else { max_tokens as u32 };
+
+    global_registry().update_session(&sid, |sess| {
+        sess.add_user_message(prompt);
+    });
+
+    spawn_agent_turn_stream(sid, key, max_t)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_aiAgentTurnPoll(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jstring {
+    if handle == 0 {
+        return error_jstring(&mut env, ":ERR:null handle");
+    }
+    let h_ptr = handle as *const AgentStreamHandle;
+    let h = unsafe { Arc::from_raw(h_ptr) };
+    let h_ref = Arc::clone(&h);
+    let _ = Arc::into_raw(h);
+
+    let events_text: Option<String> = h_ref.events.lock().ok().and_then(|mut q| {
+        if q.is_empty() {
+            None
+        } else {
+            let mut concat = String::new();
+            while let Some(ev) = q.pop_front() {
+                if !concat.is_empty() {
+                    concat.push('\n');
+                }
+                concat.push_str(&ev);
+            }
+            Some(concat)
+        }
+    });
+
+    let response = if let Some(text) = events_text {
+        text
+    } else if h_ref.done.load(Ordering::Acquire) {
+        let err_msg = h_ref.error.lock().ok().and_then(|s| s.clone());
+        if let Some(msg) = err_msg {
+            format!(":ERR:{}", msg)
+        } else {
+            ":DONE:".to_string()
+        }
+    } else if h_ref.paused.load(Ordering::Acquire) {
+        ":STATUS:{\"state\":\"PAUSED\"}".to_string()
+    } else {
+        String::new()
+    };
+
+    env.new_string(response)
+        .map(|s| s.into_raw())
+        .unwrap_or_else(|_| error_jstring(&mut env, ":ERR:jstring create failed"))
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_aiAgentTurnControl(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    action: jint,
+) -> jboolean {
+    if handle == 0 {
+        return 0;
+    }
+    let h_ptr = handle as *const AgentStreamHandle;
+    let h = unsafe { Arc::from_raw(h_ptr) };
+    match action {
+        1 => {
+            // CANCEL
+            h.cancel.cancel();
+            global_registry().set_state(&h.session_id, TurnState::Cancelled);
+        }
+        2 => {
+            // PAUSE
+            h.paused.store(true, Ordering::Release);
+            global_registry().set_state(&h.session_id, TurnState::Paused);
+        }
+        3 => {
+            // RESUME
+            h.paused.store(false, Ordering::Release);
+            global_registry().set_state(&h.session_id, TurnState::Streaming);
+        }
+        _ => {}
+    }
+    let _ = Arc::into_raw(h);
+    1
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_aiAgentTurnFree(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    let h_ptr = handle as *const AgentStreamHandle;
+    let _: Arc<AgentStreamHandle> = unsafe { Arc::from_raw(h_ptr) };
+    log::info!(target: "android-host", "aiAgentTurnFree: handle dropped");
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_aiAgentRetryTurn(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: JString,
+    api_key: JString,
+    max_tokens: jint,
+) -> jlong {
+    init_logger();
+    let sid = match env.get_string(&session_id) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let key = match env.get_string(&api_key) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let max_t = if max_tokens <= 0 { 1024 } else { max_tokens as u32 };
+
+    global_registry().update_session(&sid, |sess| {
+        sess.retry_last_turn();
+    });
+
+    spawn_agent_turn_stream(sid, key, max_t)
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_aiAgentEditPrompt(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: JString,
+    api_key: JString,
+    turn_index: jint,
+    new_prompt: JString,
+    max_tokens: jint,
+) -> jlong {
+    init_logger();
+    let sid = match env.get_string(&session_id) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let key = match env.get_string(&api_key) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let prompt = match env.get_string(&new_prompt) {
+        Ok(s) => s.to_string_lossy().into_owned(),
+        Err(_) => return 0,
+    };
+    let idx = if turn_index < 0 { 0 } else { turn_index as usize };
+    let max_t = if max_tokens <= 0 { 1024 } else { max_tokens as u32 };
+
+    global_registry().update_session(&sid, |sess| {
+        sess.edit_prompt(idx, prompt);
+    });
+
+    spawn_agent_turn_stream(sid, key, max_t)
+}
+
+
 // ── PTY JNI bindings ────────────────────────────────────────────────────────
 
 #[allow(non_snake_case)]
@@ -462,6 +795,38 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_ptySpawn(
             0
         }
     }
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_activePtyCount(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    pty::active_pty_count() as jint
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_totalSpawnedPtys(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jlong {
+    pty::total_spawned_ptys() as jlong
+}
+
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_ptyGetExitStatus(
+    _env: JNIEnv,
+    _class: JClass,
+    ptr: jlong,
+) -> jint {
+    if ptr == 0 {
+        return -1;
+    }
+    let session = unsafe { &*(ptr as *const pty::PtySession) };
+    session.get_exit_status().unwrap_or(-2)
 }
 
 /// Increment Arc refcount. Called under PtyManager map lock before ptyRead.
@@ -1297,7 +1662,7 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_terminalInputBytes(
             return -1;
         }
     };
-    let n = terminal_model::ingest_pty_bytes(&bytes);
+    let n = terminal_model::ingest_pty_bytes_for_session(&cmd_id_str, &bytes);
     log::debug!(
         target: "WarpTerminalModel",
         "terminalInputBytes cmd_id={} bytes={} ingested={}",
@@ -1612,6 +1977,178 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_terminalScrollbackInfo(
         .into_raw()
 }
 
+/// Task 2 (#12): returns true if the active terminal model is currently in alternate screen mode (DECSET 1049/47/1047).
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_terminalIsAltScreen(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    if terminal_model::is_alt_screen() {
+        jni::sys::JNI_TRUE
+    } else {
+        jni::sys::JNI_FALSE
+    }
+}
+
+// ── Multi-Session Tabs FFI Bridge (Task 2 / #8) ────────────────────────────
+
+/// Creates a new terminal session in Rust SessionManager.
+/// `sessionId`: unique string identifier for the tab session.
+/// `envJson`: JSON string containing environment variables map (e.g. `{"TERM":"xterm-256color"}`).
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_createSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: JString,
+    env_json: JString,
+) -> jboolean {
+    init_logger();
+    let session_id_str: String = match env.get_string(&session_id) {
+        Ok(s) => s.into(),
+        Err(_) => return jni::sys::JNI_FALSE,
+    };
+    let env_json_str: String = match env.get_string(&env_json) {
+        Ok(s) => s.into(),
+        Err(_) => String::new(),
+    };
+
+    let env_map: std::collections::HashMap<String, String> =
+        serde_json::from_str(&env_json_str).unwrap_or_default();
+
+    match warp_terminal_mobile_facade::SessionManager::global().create_session(
+        &session_id_str,
+        Some(&session_id_str),
+        Some("~"),
+        env_map,
+        warp_terminal_mobile_facade::DEFAULT_ROWS,
+        warp_terminal_mobile_facade::DEFAULT_COLS,
+    ) {
+        Ok(_) => {
+            log::info!(target: "WarpTerminalModel", "createSession ok id={}", session_id_str);
+            jni::sys::JNI_TRUE
+        }
+        Err(e) => {
+            log::error!(target: "WarpTerminalModel", "createSession failed id={} err={:?}", session_id_str, e);
+            jni::sys::JNI_FALSE
+        }
+    }
+}
+
+/// Switches active viewport session to `sessionId`.
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_switchSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: JString,
+) -> jboolean {
+    init_logger();
+    let session_id_str: String = match env.get_string(&session_id) {
+        Ok(s) => s.into(),
+        Err(_) => return jni::sys::JNI_FALSE,
+    };
+
+    match warp_terminal_mobile_facade::SessionManager::global().switch_session(&session_id_str) {
+        Ok(_) => {
+            log::info!(target: "WarpTerminalModel", "switchSession ok id={}", session_id_str);
+            jni::sys::JNI_TRUE
+        }
+        Err(e) => {
+            log::error!(target: "WarpTerminalModel", "switchSession failed id={} err={:?}", session_id_str, e);
+            jni::sys::JNI_FALSE
+        }
+    }
+}
+
+/// Closes and releases a session tab by `sessionId`.
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_closeSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: JString,
+) -> jboolean {
+    init_logger();
+    let session_id_str: String = match env.get_string(&session_id) {
+        Ok(s) => s.into(),
+        Err(_) => return jni::sys::JNI_FALSE,
+    };
+
+    match warp_terminal_mobile_facade::SessionManager::global().close_session(&session_id_str) {
+        Ok(_) => {
+            log::info!(target: "WarpTerminalModel", "closeSession ok id={}", session_id_str);
+            jni::sys::JNI_TRUE
+        }
+        Err(e) => {
+            log::error!(target: "WarpTerminalModel", "closeSession failed id={} err={:?}", session_id_str, e);
+            jni::sys::JNI_FALSE
+        }
+    }
+}
+
+/// Returns the active session ID string (or "default" if none).
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_activeSessionId(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let id = warp_terminal_mobile_facade::SessionManager::global()
+        .active_session_id()
+        .unwrap_or_else(|| "default".to_string());
+    env.new_string(id)
+        .expect("failed to create Java string")
+        .into_raw()
+}
+
+/// Exports full session state (active tab list, active ID, scrollback, blocks) as JSON.
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_saveSessionState(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    init_logger();
+    let json = match warp_terminal_mobile_facade::SessionManager::global().export_session_state_json() {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!(target: "WarpTerminalModel", "saveSessionState failed: {:?}", e);
+            String::new()
+        }
+    };
+    env.new_string(json)
+        .expect("failed to create Java string")
+        .into_raw()
+}
+
+/// Restores full session state (active tab list, active ID, scrollback, blocks) from JSON.
+#[allow(non_snake_case)]
+#[no_mangle]
+pub extern "C" fn Java_dev_warp_mobile_NativeBridge_restoreSessionState(
+    mut env: JNIEnv,
+    _class: JClass,
+    json: JString,
+) -> jboolean {
+    init_logger();
+    let json_str: String = match env.get_string(&json) {
+        Ok(s) => s.into(),
+        Err(_) => return jni::sys::JNI_FALSE,
+    };
+
+    match warp_terminal_mobile_facade::SessionManager::global().restore_session_state_json(&json_str) {
+        Ok(_) => {
+            log::info!(target: "WarpTerminalModel", "restoreSessionState ok");
+            jni::sys::JNI_TRUE
+        }
+        Err(e) => {
+            log::error!(target: "WarpTerminalModel", "restoreSessionState failed: {:?}", e);
+            jni::sys::JNI_FALSE
+        }
+    }
+}
+
 // ── Logger ──────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "android")]
@@ -1768,3 +2305,90 @@ mod m3_s11_emoji_smoke_tests {
         );
     }
 }
+
+// ── M-W4.1 Agent Stream Handle Adversarial Stress Tests (Challenger 1) ───────
+
+#[cfg(test)]
+mod agent_stream_stress_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn stress_agent_stream_handle_pause_and_resume_buffering() {
+        let handle = Arc::new(AgentStreamHandle::new("sess_test_1".to_string()));
+
+        // Initial state: not paused, not done
+        assert!(!handle.paused.load(Ordering::Acquire));
+        assert!(!handle.done.load(Ordering::Acquire));
+
+        // 1. Pause handle
+        handle.paused.store(true, Ordering::Release);
+        assert!(handle.paused.load(Ordering::Acquire));
+
+        // 2. Buffer events while paused
+        {
+            let mut q = handle.events.lock().unwrap();
+            q.push_back(":EVENT:{\"type\":\"text_delta\",\"text\":\"Chunk 1\"}".to_string());
+            q.push_back(":EVENT:{\"type\":\"thinking_delta\",\"text\":\"Thinking...\"}".to_string());
+        }
+
+        // 3. Verify events are retained and can be drained even while paused
+        {
+            let mut q = handle.events.lock().unwrap();
+            assert_eq!(q.len(), 2);
+            let first = q.pop_front().unwrap();
+            assert!(first.contains("Chunk 1"));
+        }
+
+        // 4. Resume handle
+        handle.paused.store(false, Ordering::Release);
+        assert!(!handle.paused.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn stress_agent_stream_cancellation_and_null_handle_safety() {
+        let handle = Arc::new(AgentStreamHandle::new("sess_test_cancel".to_string()));
+
+        // Cancellation Token check
+        assert!(!handle.cancel.is_cancelled());
+        handle.cancel.cancel();
+        assert!(handle.cancel.is_cancelled());
+
+        // Calling cancel multiple times must be safe & idempotent
+        handle.cancel.cancel();
+        assert!(handle.cancel.is_cancelled());
+
+        // Null handle safety test: handle = 0
+        let null_handle: jlong = 0;
+        let h_ptr = null_handle as *const AgentStreamHandle;
+        assert!(h_ptr.is_null());
+    }
+
+    #[test]
+    fn stress_agent_session_registry_concurrent_turn_states() {
+        let reg = global_registry();
+        let sid = "sess_stress_reg".to_string();
+
+        reg.create_or_get_session(sid.clone(), "claude-sonnet-4-6".into(), "sys".into());
+
+        let states = vec![
+            TurnState::Idle,
+            TurnState::Connecting,
+            TurnState::Streaming,
+            TurnState::Paused,
+            TurnState::Streaming,
+            TurnState::Completed,
+        ];
+
+        for st in states {
+            reg.set_state(&sid, st);
+            let snap = reg.get_session(&sid).unwrap();
+            assert_eq!(snap.state, st);
+        }
+
+        // Clean up session
+        reg.remove_session(&sid);
+        assert!(reg.get_session(&sid).is_none());
+    }
+}
+

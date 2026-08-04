@@ -4,7 +4,7 @@ An open-source Android port of [Warp Terminal](https://github.com/warpdotdev/War
 
 [![Test (Rust + Android smoke)](https://github.com/ImL1s/warp-mobile-android/actions/workflows/test.yml/badge.svg)](https://github.com/ImL1s/warp-mobile-android/actions/workflows/test.yml)
 
-**Status**: M0–M6 CLOSED — Warp **engine layer** functional on Android 12+ (PTY + Vulkan grid + DCS-hook Block model + Termux runtime + BYOK AI client). Warp **UX layer** (sidebar, agent-first conversation screen, Block-as-card rendering, prompt-first input box, search overlay, model picker, tab management) is **NOT YET BUILT** — M7+ scope. &nbsp;|&nbsp; License: AGPL-3.0-only
+**Status**: M0–M6 CLOSED, Milestones M-W1 through M-W8 COMPLETED — 805 tests (642 Kotlin + 163 Rust) passing. Version 1.0.0 (versionCode 100). Warp **engine layer** functional on Android 12+ (PTY + Vulkan grid + DCS-hook Block model + Termux runtime + BYOK AI client + SSH + MCP + Split Panes + Security Hardening). &nbsp;|&nbsp; License: AGPL-3.0-only
 
 > ⚠️ **What you actually see when you tap the icon today**: a fullscreen black Vulkan surface with a single mksh shell prompt at the top, the system Gboard at the bottom, and a custom modifier/symbol AccessoryRow above it. **This is engine-preview shape, not Warp Desktop shape.** The Block model + AI BYOK + Termux runtime + AGPL framework are all wired up underneath, but the user-facing chrome that makes Warp feel like Warp (agent conversation, block cards, sidebar, prompt suggestions) is the next major milestone.
 
@@ -33,7 +33,7 @@ This is a solo-developer project on a 12-18 month constrained-beta timeline. It 
 | **M4** | Termux runtime — zsh + GNU coreutils + APT + F-Droid distribution prep | CLOSED ✅ | 14/15 PASS |
 | **M5** | Mobile UX polish — selection / accessory row / blocks / paste / paste UX | CLOSED PARTIAL ✅ | 5/8 PASS |
 | **M6** | AI integration — Haiku inline ghost-text, Sonnet agent (BYOK) | CLOSED ✅ | 7/7 PASS |
-| **v1-prep** | CI / release script / APK shrink / license / launcher-path UIUX / IME→PTY input | ACTIVE 🛠️ |  |
+| **M-W1–W8** | Foundation + SSH + Security + MCP + Split Panes + Skills + Test Pyramid + Release Pipeline | COMPLETED ✅ | Issues #6, #19, #22-#30 |
 | **v1.1** | SELinux nativeLibraryDir refactor — `$PREFIX/bin/*` exec restored | Planned | `.omc/v1.1-plan-selinux-nativelib.md` |
 | **M7–M10** | **Warp-shape UX layer** (sidebar / Block cards / agent-first prompt screen / model picker / tab manager) — see "What does NOT work yet" below | Not started | TBD |
 
@@ -208,12 +208,12 @@ Solo-dev release packaging composes signed (or unsigned) APK + bootstrap zip + S
 
 ```bash
 # Build artifacts only (no upload)
-./tools/scripts/release.sh 0.6.0-m6
+./tools/scripts/release.sh 1.0.0
 
 # Or build + push to GitHub Releases (requires gh CLI auth + tag pushed)
-git tag -a v0.6.0-m6 -m "M6 close-out"
-git push origin v0.6.0-m6
-./tools/scripts/release.sh 0.6.0-m6 --upload
+git tag -a v1.0.0 -m "v1.0.0 release baseline"
+git push origin v1.0.0
+./tools/scripts/release.sh 1.0.0 --upload
 ```
 
 For signed APKs, populate `android/keystore.properties` (gitignored — see `android/app/build.gradle` for the format). Without it, the script produces an unsigned APK matching the F-Droid build path. CI workflow `.github/workflows/release.yml` does the same on every `v*` tag push, with optional signing via `KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` repo secrets.

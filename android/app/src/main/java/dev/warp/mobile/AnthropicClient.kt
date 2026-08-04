@@ -122,7 +122,7 @@ object AnthropicClient {
             // shows `Bearer sk-ant-***...XXXX` so the full key never
             // appears in logcat / bug reports.
             conn.setRequestProperty("X-Api-Key", apiKey)
-            Log.i(LOG_TAG, "POST $ENDPOINT auth=${AiKeyStore.redact(apiKey)} body_len=${body.length}")
+            try { Log.i(LOG_TAG, "POST $ENDPOINT auth=${AiKeyStore.redact(apiKey)} body_len=${body.length}") } catch (_: Throwable) {}
 
             conn.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
 
@@ -132,7 +132,7 @@ object AnthropicClient {
                 BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).use { r -> r.readText() }
             } ?: ""
             val elapsed = System.currentTimeMillis() - t0
-            Log.i(LOG_TAG, "response code=$code elapsedMs=$elapsed body_len=${responseText.length}")
+            try { Log.i(LOG_TAG, "response code=$code elapsedMs=$elapsed body_len=${responseText.length}") } catch (_: Throwable) {}
 
             if (code !in 200..299) {
                 // Try to parse the Anthropic error envelope for a clearer
@@ -170,7 +170,7 @@ object AnthropicClient {
             val outputTokens = usage?.optInt("output_tokens", 0) ?: 0
             return TestResult.Ok(firstText, elapsed, inputTokens, outputTokens)
         } catch (e: Throwable) {
-            Log.e(LOG_TAG, "testConnection threw: ${e.javaClass.simpleName}: ${e.message}")
+            try { Log.e(LOG_TAG, "testConnection threw: ${e.javaClass.simpleName}: ${e.message}") } catch (_: Throwable) {}
             return TestResult.NetworkError("${e.javaClass.simpleName}: ${e.message ?: "(unknown)"}")
         } finally {
             try { conn.disconnect() } catch (_: Throwable) { /* best effort */ }

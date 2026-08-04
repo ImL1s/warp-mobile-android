@@ -14,9 +14,32 @@ For per-milestone narrative + ledger detail (codex review rounds, per-layer GO/C
 
 For per-iteration lessons learned, see [`progress.txt`](progress.txt).
 
----
+## [Unreleased]
 
-## [Unreleased] — v1-prep
+### Added (Wave 6-8: Issues #19, #22-#25, #28-#30)
+
+- **Secure SSH Remote Sessions (#22)**: Rust state machine model (`ssh_client.rs`) with `SshConnectionConfig`, `SshAuthMethod`, `SshSession`, `SshHostKeyVerification`. Kotlin `SshConnectionManager`, `HostKeyVerificationDialog`, `SshSessionViewModel`.
+- **Security Hardening (#23)**: `LogcatSanitizer` (regex-based API key/token/password redaction), `SecureLogger` (auto-sanitizing Log wrapper), `KeyStoreManager` (AES-256-GCM with Android KeyStore). `security-audit.sh` CI script.
+- **MCP Client/Server Manager (#29)**: JSON-RPC 2.0 message types (`McpMessage`), `McpToolRegistry` with permission gating, `McpTransport` interface with `StdioTransport` implementation.
+- **Split Panes & Launch Config (#30)**: `PaneLayout` calculator (horizontal/vertical splits), `LaunchConfig` JSON serialization (per-pane cwd/env/startupCommand), `PaneInputRouter` (focus-based input routing).
+- **Project Rules & Local Skills (#28)**: `.warprules` file parser (`ProjectRulesParser`), local skill registry scanning `.warp/skills/` with case-insensitive keyword matching.
+- **Adaptive Layouts & Accessibility (#19)**: `WindowSizeClassResolver`, `WarpAdaptiveLayout`, `FoldablePostureHandler`, `DeXLayoutHandler`, `WarpAccessibilityNodeProvider`.
+- **Deterministic Test Pyramid (#24)**: 805 tests (642 Kotlin JVM + 163 Rust) across 4 tiers, 0 failures.
+- **Release Pipeline (#25)**: `release.sh` with APK + bootstrap zip + SHA256SUMS packaging, `ReleasePipelineValidationTest.kt`.
+
+### Changed
+
+- **Terminal parser upgraded**: UTF-8 streaming (`utf8_buf`), CJK wide char support (`unicode-width`, `ATTR_WIDE_CONTINUATION`), grapheme cluster rendering (`Cell.grapheme: Option<String>`), OSC 0/2 (title), OSC 7 (cwd), OSC 8 (hyperlinks), DECSET 1049/47/1047 alt screen tracking, 256-color (`38;5;N`), truecolor (`38;2;R;G;B`), colon-separated SGR subparameters, strikethrough (SGR 9/29).
+- **CI workflow upgraded**: JDK 17 → 21, compile-only → full 642-test unit test suite, `testDebugUnitTest` replaces `compileDebugKotlin`.
+- **Fastlane changelog** (`changelogs/100.txt`) updated with Wave 6-8 features.
+
+## [1.0.0] — 2026-08-03 — Milestone M-W1 Task 1 Release Reconciliation Baseline
+
+### Changed
+- **Version & Spec Reconciliation (Issue #6)**: Reconciled project version across Cargo workspace (`1.0.0`), Gradle build configuration (`versionCode 100`, `versionName "1.0.0"`), F-Droid recipe (`metadata/dev.warp.mobile.yml`), Fastlane changelogs (`fastlane/metadata/android/en-US/changelogs/100.txt`), release scripts (`tools/scripts/release.sh`), GitHub workflows (`.github/workflows/release.yml`), issue templates (`.github/ISSUE_TEMPLATE/bug_report.yml`), and documentation (`README.md`, `CLAUDE.md`, `PROJECT.md`).
+- **Canonical Ledger**: Closed Issue #6 and updated Milestone M-W1 Task 1 ledger status in `PROJECT.md`.
+
+## [0.6.0-m6-v1prep] — 2026-05-02
 
 In progress: engine layer + launcher-path UIUX + IME→PTY input now functional on Galaxy S24 Ultra. v1.0 ship is **gated on M7-M10** (Warp-shape UX layer — sidebar, agent-first prompt screen, Block-as-card rendering, model picker, tab manager) per `.omc/m7-plan-warp-ux-layer.md`. Keystore generation + F-Droid recipe submission still gated on user.
 

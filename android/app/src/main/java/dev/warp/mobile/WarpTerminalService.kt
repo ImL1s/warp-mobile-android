@@ -22,7 +22,13 @@ import java.io.File
 class WarpTerminalService : Service() {
 
     companion object {
-        init { System.loadLibrary("warp_mobile_android_host") }
+        init {
+            try {
+                System.loadLibrary("warp_mobile_android_host")
+            } catch (e: Throwable) {
+                // Ignored on host JVM desktop test environments where native .so/.dll is absent
+            }
+        }
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "warp-terminal"
         private const val LOG_TAG = "WarpTerminal"
@@ -33,6 +39,8 @@ class WarpTerminalService : Service() {
         const val ACTION_RESIZE = "dev.warp.mobile.PTY_RESIZE"
         const val ACTION_KILL   = "dev.warp.mobile.PTY_KILL"
         const val ACTION_OUTPUT = "dev.warp.mobile.PTY_OUTPUT"
+        private const val MAX_FAST_DEATH_RETRIES = 3
+        private const val FAST_DEATH_THRESHOLD_MS = 1500L
     }
 
     private val ptyManager = PtyManager()
@@ -43,61 +51,31 @@ class WarpTerminalService : Service() {
     // bad fallback (e.g. /system/bin/sh somehow also dying) does not loop
     // forever. Keyed by cmd_id.
     private val fallbackAttempted = mutableSetOf<String>()
+    private val fastDeathCounts = mutableMapOf<String, Int>()
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            when (intent.action) {
-                ACTION_SPAWN  -> handleSpawn(intent)
-                ACTION_WRITE  -> handleWrite(intent)
-                ACTION_RESIZE -> handleResize(intent)
-                ACTION_KILL   -> handleKill(intent)
+            val intentCopy = Intent(intent)
+            scope.launch(Dispatchers.IO) {
+                when (intentCopy.action) {
+                    ACTION_SPAWN  -> handleSpawn(intentCopy)
+                    ACTION_WRITE  -> handleWrite(intentCopy)
+                    ACTION_RESIZE -> handleResize(intentCopy)
+                    ACTION_KILL   -> handleKill(intentCopy)
+                }
             }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
-        // M3-S06: extract APK-bundled warp assets to the app's internal files
-        // directory on first launch. zsh_body.sh is bundled as
-        // assets/warp/zsh_body.sh and extracted to
-        // /data/data/dev.warp.mobile/files/warp/zsh_body.sh so PTY context
-        // (and eventually M5 Termux zsh) can source it directly from the
-        // filesystem.
-        //
-        // Refs:
-        //   https://developer.android.com/reference/android/content/res/AssetManager
-        //   (AssetManager.open / copyTo pattern)
-        extractWarpAssets()
-
-        // M4-S06: write our zsh runtime-config override to $PREFIX/etc/.zshenv.
-        // Codex M4-S03 round-7+8 finding: zsh 5.9 IGNORES the inherited
-        // MODULE_PATH env var (reinitializes module_path from compile-time
-        // default which still points at /data/data/com.termux/...). The
-        // canonical fix is shell-array assignment in $ZDOTDIR/.zshenv. We
-        // also strip any stale com.termux entries that survived in fpath
-        // via `${fpath:#/data/data/com.termux/*}` glob filter.
-        // Idempotent: only writes if usr/ is present (M4-S05 extracted) AND
-        // the file is missing or has stale content.
-        writeWarpZshenv()
-
-        // M4-S07: write apt's runtime config so apt-config + apt-get work
-        // against the dev.warp.mobile prefix. Termux's apt binary has
-        // /data/data/com.termux/files/usr/etc/apt/apt.conf.d/ baked in as
-        // its compile-time default; without an override file apt fails with
-        // "Unable to determine a suitable packaging system type". Same
-        // pattern as writeWarpZshenv: gated on usr/ presence; idempotent.
-        writeAptConfig()
-
-        // V1-prep iteration 20 (2026-05-02): replace each $PREFIX/bin/<name>
-        // ELF binary with a symlink to ${nativeLibraryDir}/<lib_name>.so so
-        // PATH lookup finds an exec-allowed file (apk_data_file SELinux
-        // label, vs the app_data_file label of the original $PREFIX/bin/X
-        // which has `neverallow ... execute`). The lib*.so itself is
-        // produced by the extractTermuxBinariesAsLibs Gradle task. Manifest
-        // mapping original→lib_name is bundled at assets/warp/
-        // termux-bin-manifest.json. Idempotent: if the entry is already a
-        // symlink to the right target, no-op.
-        installTermuxBinSymlinks()
+        // ANR protection: move asset extraction and symlink installation to background IO thread
+        scope.launch(Dispatchers.IO) {
+            extractWarpAssets()
+            writeWarpZshenv()
+            writeAptConfig()
+            installTermuxBinSymlinks()
+        }
 
         val filter = IntentFilter().apply {
             addAction(ACTION_SPAWN)
@@ -806,12 +784,13 @@ class WarpTerminalService : Service() {
             Pair(program, args)
         }
 
-        // M4-S06: build the canonical $PREFIX env. Caller can override any
-        // var via --esa env_pairs ["K=V","K2=V2"] or via Intent extra
-        // env_<KEY>=value. (Defer custom env override to M4-S07 if needed.)
-        val env = buildPrefixEnv()
+        val cwdExtra = intent.getStringExtra("cwd")
+        val homeDir = "${applicationInfo.dataDir}/files/home"
+        val resolvedCwd = if (cwdExtra != null && File(cwdExtra).isDirectory) cwdExtra else homeDir
 
-        Log.i(LOG_TAG, "PTY_SPAWN cmdId=$cmdId program=$resolvedProgram args=${resolvedArgs.toList()} env_keys=${env.keys.sorted()}")
+        val env = buildPrefixEnv(mapOf("PWD" to resolvedCwd))
+
+        Log.i(LOG_TAG, "PTY_SPAWN cmdId=$cmdId program=$resolvedProgram args=${resolvedArgs.toList()} cwd=$resolvedCwd env_keys=${env.keys.sorted()}")
         // Fix #2: PtyManager.spawn() kills existing session before replacing
         val ok = ptyManager.spawn(cmdId, resolvedProgram, resolvedArgs, env)
         if (ok) {
@@ -870,9 +849,7 @@ class WarpTerminalService : Service() {
         val cmdId = intent.getStringExtra("cmd_id") ?: "default"
         Log.i(LOG_TAG, "PTY_KILL cmdId=$cmdId")
         readJobs.remove(cmdId)?.cancel()
-        // V1-prep: a fresh spawn cycle for this cmdId should be allowed to
-        // try the configured shell again before falling back, so reset the
-        // fallback-attempted flag here.
+        fastDeathCounts.remove(cmdId)
         fallbackAttempted.remove(cmdId)
         ptyManager.kill(cmdId)
     }
@@ -895,19 +872,12 @@ class WarpTerminalService : Service() {
                 }
                 bytesRead += chunk.size
                 // M3-S04: forward each PTY chunk to the Rust terminal model.
-                // Fire-and-forget: the model handles its own dirty bit. The
-                // MainActivity Choreographer per-vsync callback consumes the
-                // bit and pushes a frame.
-                //
-                // Refs:
-                //   * Choreographer.FrameCallback / View.invalidate dirty
-                //     pattern: https://developer.android.com/reference/android/view/Choreographer.FrameCallback
-                //   * JNI byte-array passing perf guidance:
-                //     https://developer.android.com/training/articles/perf-jni
                 val ingested = NativeBridge.terminalInputBytes(cmdId, chunk)
                 if (ingested < 0) {
                     Log.w(LOG_TAG, "terminalInputBytes failed cmdId=$cmdId chunk_size=${chunk.size}")
                 }
+                val isAlt = try { NativeBridge.terminalIsAltScreen() } catch (e: Throwable) { false }
+                SessionManager.getInstance(applicationContext).onToggleRawMode(isAlt)
 
                 val text = chunk.toString(Charsets.UTF_8)
                 // Log each line tagged WarpTerminal:PtyOutput as expected by test drivers
@@ -925,51 +895,57 @@ class WarpTerminalService : Service() {
                 sendBroadcast(out)
             }
             val aliveForMs = System.currentTimeMillis() - spawnedAtMs
-            Log.i(LOG_TAG, "read loop ended cmdId=$cmdId alive_ms=$aliveForMs bytes_read=$bytesRead program=$program")
+            val exitCode = ptyManager.getExitStatus(cmdId) ?: -1
+            Log.i(LOG_TAG, "read loop ended cmdId=$cmdId alive_ms=$aliveForMs bytes_read=$bytesRead program=$program exitCode=$exitCode")
+            SessionManager.getInstance(applicationContext).onToggleRawMode(false)
 
-            // V1-prep blocker #3 mitigation (2026-05-02): the configured shell
-            // died fast enough that the launcher path would otherwise leave
-            // the user staring at an empty grid. Auto-fallback to
-            // /system/bin/sh (mksh) once per cmdId so the user gets a working
-            // terminal. The mksh shell is verified to run reliably under
-            // PtyManager (M3 device tests).
-            //
-            // Root cause (confirmed 2026-05-02): execve fails with EACCES
-            // (errno 13) because Android's SELinux policy denies
-            // `untrusted_app` domain execute access on `app_data_file` since
-            // API 29 (`neverallow untrusted_app app_data_file:file execute`).
-            // The bundled `$PREFIX/bin/zsh` is labelled `app_data_file`, so
-            // execve from the app's own foreground-service process is
-            // blocked. The real fix (post-v1.0) is to load Termux binaries
-            // out of `nativeLibraryDir` (labelled `system_lib_file`, exec-
-            // allowed) instead of `app_data_file`. Tracked in
-            // .omc/v1-prep-uiux-verification.md.
-            //
-            // Trigger: alive < 1500 ms is a strong fast-death signal for
-            // an interactive auto-spawn — a healthy shell stays alive
-            // waiting for input. We do not gate on bytes_read because the
-            // pty.rs execve-failure diagnostic itself writes a "warp-pty:
-            // execve failed errno=…" line before _exit, so the buffer is
-            // not empty even though no real shell ever ran.
-            val fastDeath = aliveForMs in 0..1500
-            val isAlreadyFallback = program == "/system/bin/sh"
-            if (fastDeath && !isAlreadyFallback && cmdId !in fallbackAttempted) {
-                fallbackAttempted.add(cmdId)
-                Log.w(
-                    LOG_TAG,
-                    "blocker #3 fallback: $program died in ${aliveForMs}ms (read $bytesRead bytes); respawning /system/bin/sh cmdId=$cmdId"
-                )
-                // Clear the terminal grid so the failed shell's stderr
-                // diagnostic ("warp-pty: execve failed errno=…") doesn't
-                // bleed into the user-facing terminal. ESC[2J = erase
-                // entire screen, ESC[H = move cursor to home (0,0).
-                NativeBridge.terminalInputBytes(cmdId, "[2J[H".toByteArray())
-                val ok = ptyManager.spawn(cmdId, "/system/bin/sh", emptyArray(), env)
-                if (ok) {
-                    startReadLoop(cmdId, "/system/bin/sh", env)
+            val fastDeath = aliveForMs in 0..FAST_DEATH_THRESHOLD_MS
+            if (fastDeath) {
+                val currentCount = (fastDeathCounts[cmdId] ?: 0) + 1
+                fastDeathCounts[cmdId] = currentCount
+
+                if (currentCount <= MAX_FAST_DEATH_RETRIES) {
+                    val backoffMs = minOf(500L * (1L shl (currentCount - 1)), 5000L)
+                    Log.w(
+                        LOG_TAG,
+                        "Fast death detected for $program (cmdId=$cmdId, attempt $currentCount/$MAX_FAST_DEATH_RETRIES, alive ${aliveForMs}ms, exitCode $exitCode); retrying in ${backoffMs}ms with fallback /system/bin/sh"
+                    )
+                    kotlinx.coroutines.delay(backoffMs)
+
+                    // Clear the terminal grid so the failed shell's stderr diagnostic doesn't bleed into the UI
+                    NativeBridge.terminalInputBytes(cmdId, "\u001b[2J\u001b[H".toByteArray())
+                    val fallbackProg = "/system/bin/sh"
+                    ptyManager.kill(cmdId)
+                    val ok = ptyManager.spawn(cmdId, fallbackProg, emptyArray(), env)
+                    if (ok) {
+                        startReadLoop(cmdId, fallbackProg, env)
+                    } else {
+                        val errCode = if (exitCode != -1) exitCode else 127
+                        val errBanner = "\r\n\u001b[31;1m[Warp Terminal Error] Failed to spawn fallback shell (exit code: $errCode).\u001b[0m\r\n"
+                        NativeBridge.terminalInputBytes(cmdId, errBanner.toByteArray())
+                        try {
+                            SessionManager.getInstance(applicationContext).updateProcessState(cmdId, ProcessState.ERROR, errCode)
+                        } catch (e: Throwable) {}
+                        ptyManager.kill(cmdId)
+                    }
                 } else {
-                    Log.e(LOG_TAG, "blocker #3 fallback: /system/bin/sh spawn ALSO failed cmdId=$cmdId")
+                    Log.e(LOG_TAG, "Fast death auto-recovery capped out after $MAX_FAST_DEATH_RETRIES retries for cmdId=$cmdId")
+                    val errCode = if (exitCode != -1) exitCode else 127
+                    val errBanner = "\r\n\u001b[31;1m[Warp Terminal Error] Shell exited immediately (exit code: $errCode). Auto-recovery capped out after $MAX_FAST_DEATH_RETRIES retries.\u001b[0m\r\n"
+                    NativeBridge.terminalInputBytes(cmdId, errBanner.toByteArray())
+                    try {
+                        SessionManager.getInstance(applicationContext).updateProcessState(cmdId, ProcessState.ERROR, errCode)
+                    } catch (e: Throwable) {}
+                    ptyManager.kill(cmdId)
                 }
+            } else {
+                fastDeathCounts.remove(cmdId)
+                Log.i(LOG_TAG, "Shell process cmdId=$cmdId exited after ${aliveForMs}ms with exit code $exitCode")
+                val finalState = if (exitCode == 0) ProcessState.EXITED else ProcessState.ERROR
+                try {
+                    SessionManager.getInstance(applicationContext).updateProcessState(cmdId, finalState, exitCode)
+                } catch (e: Throwable) {}
+                ptyManager.kill(cmdId)
             }
         }
         readJobs[cmdId] = job

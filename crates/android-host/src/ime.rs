@@ -114,9 +114,14 @@ mod tests {
     //! (`global_ime()` reset semantics, `stats_string()` formatting), not
     //! the underlying state machine which lives in the shared rlib.
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn singleton_reset_clears_counters() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
         // Use the singleton path to verify reset() does what driver expects.
         commit_text("a", 1);
         commit_text("b", 1);
@@ -129,6 +134,7 @@ mod tests {
 
     #[test]
     fn stats_string_schema_matches_driver_grep() {
+        let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Driver greps for these field tokens; the schema must stay stable.
         reset();
         commit_text("x", 1);

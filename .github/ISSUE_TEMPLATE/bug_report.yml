@@ -19,7 +19,7 @@ body:
     attributes:
       label: App version
       description: From `Settings → Warp Mobile` or `adb shell dumpsys package dev.warp.mobile | grep versionName`
-      placeholder: "0.6.0-m6"
+      placeholder: "1.0.0"
     validations:
       required: true
 

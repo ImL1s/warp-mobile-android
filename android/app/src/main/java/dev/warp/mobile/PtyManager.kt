@@ -71,6 +71,20 @@ class PtyManager {
         sessions.clear()
     }
 
+    fun activeCount(): Int {
+        return try {
+            NativeBridge.activePtyCount()
+        } catch (e: Throwable) {
+            synchronized(this) { sessions.size }
+        }
+    }
+
+    fun getExitStatus(cmdId: String): Int? {
+        val ptr = synchronized(this) { sessions[cmdId] } ?: return null
+        val status = NativeBridge.ptyGetExitStatus(ptr)
+        return if (status == -2) null else status
+    }
+
     companion object {
         private const val LOG_TAG = "WarpTerminal"
     }

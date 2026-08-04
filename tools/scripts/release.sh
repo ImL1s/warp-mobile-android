@@ -8,9 +8,9 @@
 #   - optional gh release create + upload
 #
 # Solo-dev usage:
-#   ./tools/scripts/release.sh 0.6.0-m6
-#   ./tools/scripts/release.sh 0.6.0-m6 --upload    # also push to GitHub Releases
-#   ./tools/scripts/release.sh 0.6.0-m6 --dry-run   # build artifacts but skip everything else
+#   ./tools/scripts/release.sh 1.0.0
+#   ./tools/scripts/release.sh 1.0.0 --upload    # also push to GitHub Releases
+#   ./tools/scripts/release.sh 1.0.0 --dry-run   # build artifacts but skip everything else
 #
 # Prereqs:
 #   - cargo + cargo-ndk on PATH
@@ -37,7 +37,7 @@
 set -euo pipefail
 
 VERSION="${1:?Usage: $0 <version> [--upload] [--dry-run]
-e.g. $0 0.6.0-m6 --upload}"
+e.g. $0 1.0.0 --upload}"
 shift || true
 
 UPLOAD=false
@@ -127,8 +127,8 @@ echo "==> [3/4] generating SHA256SUMS + RELEASE_NOTES.md" >&2
     "bootstrap-aarch64-$VERSION.zip" \
     > SHA256SUMS)
 
-# Extract the matching changelog entry (e.g. fastlane/.../changelogs/6.txt
-# for version 0.6.0-m6 — versionCode is the file name).
+# Extract the matching changelog entry (e.g. fastlane/.../changelogs/100.txt
+# for version 1.0.0 — versionCode is the file name).
 GRADLE_VERCODE=$(grep '^[[:space:]]*versionCode' "$REPO_ROOT/android/app/build.gradle" | head -1 | awk '{print $2}')
 CHANGELOG_FILE="$REPO_ROOT/fastlane/metadata/android/en-US/changelogs/$GRADLE_VERCODE.txt"
 if [[ -f "$CHANGELOG_FILE" ]]; then

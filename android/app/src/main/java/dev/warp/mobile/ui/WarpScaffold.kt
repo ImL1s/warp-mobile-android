@@ -46,6 +46,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,11 +55,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import dev.warp.mobile.WarpBlockState
+import dev.warp.mobile.ai.CommandApprovalDialog
+import dev.warp.mobile.ai.CommandApprovalManager
+import dev.warp.mobile.search.UnifiedSearchProvider
 import kotlinx.coroutines.launch
 
 /**
@@ -69,11 +77,6 @@ import kotlinx.coroutines.launch
  * lambda — typically an AndroidView wrapping the SurfaceView/WarpInputView/
  * AccessoryRow tree from MainActivity), bottom prompt box for agent +
  * `/<command>` palette + model picker.
- *
- * This is the first cut: cosmetic-only. Tabs list / search / prompt-box
- * input do not yet drive any backend behaviour. M7-S04 wires the new-tab
- * button to PtyManager.spawn; M7-S08 wires search; M9 wires the prompt
- * composer to the BYOK agent.
  */
 
 data class WarpTab(
@@ -87,16 +90,41 @@ data class WarpTab(
 fun WarpScaffold(
     tabs: List<WarpTab>,
     activeTabId: String,
+    blocks: List<WarpBlockState> = emptyList(),
+    isRawMode: Boolean = false,
+    layoutType: WarpLayoutType = WarpLayoutType.COMPACT_SINGLE_PANE,
     onTabSelected: (String) -> Unit,
     onNewTab: () -> Unit,
     onSettings: () -> Unit,
     onPromptSubmit: (String) -> Unit,
+    onRerunBlock: ((WarpBlockState) -> Unit)? = null,
+    onExplainBlock: ((WarpBlockState) -> Unit)? = null,
+    onShareBlock: ((WarpBlockState) -> Unit)? = null,
     content: @Composable (PaddingValues) -> Unit
 ) {
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     var searchText by remember { mutableStateOf("") }
-    var promptText by remember { mutableStateOf("") }
+    var promptTextFieldValue by remember { mutableStateOf(TextFieldValue("")) }
+
+    val searchProvider = remember { UnifiedSearchProvider(coroutineScope = scope) }
+    val searchState by searchProvider.state.collectAsState()
+
+    val pendingApproval by CommandApprovalManager.pendingApproval.collectAsState()
+    val context = LocalContext.current
+
+    pendingApproval?.let { pending ->
+        CommandApprovalDialog(
+            command = pending.command,
+            riskLevel = pending.riskLevel,
+            onApprove = {
+                CommandApprovalManager.submitDecision(context, approved = true)
+            },
+            onReject = {
+                CommandApprovalManager.submitDecision(context, approved = false)
+            }
+        )
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -203,12 +231,12 @@ fun WarpScaffold(
                 TopAppBar(
                     title = {
                         // Top search field — mirrors Warp Desktop's "Search
-                        // sessions, agents, files…" hero. Non-functional in
-                        // M7-S03; will wire to a global search overlay in M7-S08.
+                        // sessions, agents, files…" hero.
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(36.dp),
+                                .height(36.dp)
+                                .clickable { searchProvider.setOverlayVisible(true) },
                             shape = RoundedCornerShape(18.dp),
                             color = MaterialTheme.colorScheme.surfaceVariant
                         ) {
@@ -239,6 +267,9 @@ fun WarpScaffold(
                         }
                     },
                     actions = {
+                        IconButton(onClick = { searchProvider.setOverlayVisible(true) }) {
+                            Icon(Icons.Filled.Search, contentDescription = "Search")
+                        }
                         IconButton(onClick = onNewTab) {
                             Icon(Icons.Filled.Add, contentDescription = "New tab")
                         }
@@ -253,20 +284,69 @@ fun WarpScaffold(
                 )
             },
             bottomBar = {
-                WarpPromptComposer(
-                    value = promptText,
-                    onValueChange = { promptText = it },
-                    onSubmit = {
-                        if (promptText.isNotBlank()) {
+                PromptComposer(
+                    value = promptTextFieldValue,
+                    onValueChange = { promptTextFieldValue = it },
+                    onSubmit = { promptText ->
+                        if (promptText.trim() == "/search") {
+                            searchProvider.setOverlayVisible(true)
+                        } else {
                             onPromptSubmit(promptText)
-                            promptText = ""
                         }
+                    },
+                    onOpenSearch = {
+                        searchProvider.setOverlayVisible(true)
                     }
                 )
             },
             containerColor = MaterialTheme.colorScheme.background
         ) { padding ->
-            content(padding)
+            Box(modifier = Modifier.fillMaxSize()) {
+                content(padding)
+                if (!isRawMode) {
+                    BlockTimeline(
+                        blocks = blocks,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(padding),
+                        onRerunBlock = { onRerunBlock?.invoke(it) },
+                        onExplainBlock = { onExplainBlock?.invoke(it) },
+                        onCopyBlock = { block ->
+                            if (onShareBlock != null) onShareBlock.invoke(block)
+                        }
+                    )
+                }
+
+                if (searchState.isOverlayVisible) {
+                    UnifiedSearchOverlay(
+                        searchState = searchState,
+                        onQueryChanged = { searchProvider.onQueryChanged(it) },
+                        onDomainSelected = { searchProvider.onDomainSelected(it) },
+                        onDismiss = { searchProvider.setOverlayVisible(false) },
+                        onSelectNext = { searchProvider.selectNextResult() },
+                        onSelectPrevious = { searchProvider.selectPreviousResult() },
+                        onSessionSelected = { sessionId ->
+                            onTabSelected(sessionId)
+                            searchProvider.setOverlayVisible(false)
+                        },
+                        onBlockSelected = { sessionId, _ ->
+                            if (sessionId != null) onTabSelected(sessionId)
+                            searchProvider.setOverlayVisible(false)
+                        },
+                        onHistorySelected = { cmd ->
+                            promptTextFieldValue = TextFieldValue(cmd, TextRange(cmd.length))
+                            searchProvider.setOverlayVisible(false)
+                        },
+                        onAiBlockSelected = { sessionId, _ ->
+                            if (sessionId != null) onTabSelected(sessionId)
+                            searchProvider.setOverlayVisible(false)
+                        },
+                        onFileSelected = { _ ->
+                            searchProvider.setOverlayVisible(false)
+                        }
+                    )
+                }
+            }
         }
     }
 }

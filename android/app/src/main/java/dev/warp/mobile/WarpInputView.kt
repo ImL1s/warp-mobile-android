@@ -145,7 +145,11 @@ class WarpInputView @JvmOverloads constructor(
         currentScrollOffsetRows = 0
         pixelAccumulator = 0f
         cancelFling()
-        NativeBridge.terminalSetScrollOffset(0)
+        try {
+            NativeBridge.terminalSetScrollOffset(0)
+        } catch (t: Throwable) {
+            Log.w(TAG, "terminalSetScrollOffset failed: ${t.message}")
+        }
     }
 
     private fun cancelFling() {
@@ -162,7 +166,11 @@ class WarpInputView @JvmOverloads constructor(
          */
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
             Log.i(TAG, "gesture_tap x=${e.x} y=${e.y}")
-            NativeBridge.inputTap(e.x, e.y)
+            try {
+                NativeBridge.inputTap(e.x, e.y)
+            } catch (t: Throwable) {
+                Log.w(TAG, "inputTap failed: ${t.message}")
+            }
             return true
         }
 
@@ -172,7 +180,11 @@ class WarpInputView @JvmOverloads constructor(
          */
         override fun onLongPress(e: MotionEvent) {
             Log.i(TAG, "gesture_long_press x=${e.x} y=${e.y}")
-            NativeBridge.inputLongPress(e.x, e.y)
+            try {
+                NativeBridge.inputLongPress(e.x, e.y)
+            } catch (t: Throwable) {
+                Log.w(TAG, "inputLongPress failed: ${t.message}")
+            }
         }
 
         /**
@@ -208,7 +220,11 @@ class WarpInputView @JvmOverloads constructor(
                 vy = 0f
             }
             Log.d(TAG, "gesture_scroll x=${e2.x} y=${e2.y} dx=$distanceX dy=$distanceY vx=$vx vy=$vy")
-            NativeBridge.inputScroll(e2.x, e2.y, distanceX, distanceY, vx, vy)
+            try {
+                NativeBridge.inputScroll(e2.x, e2.y, distanceX, distanceY, vx, vy)
+            } catch (t: Throwable) {
+                Log.w(TAG, "inputScroll failed: ${t.message}")
+            }
 
             // M3-S09: drag scroll → terminal viewport offset.
             //
@@ -242,7 +258,11 @@ class WarpInputView @JvmOverloads constructor(
                     // accumulator on no-op clamps so a sustained
                     // upward drag past the top doesn't keep producing
                     // "delta but Rust unchanged" cycles.
-                    val clamped = NativeBridge.terminalSetScrollOffset(requested)
+                    val clamped = try {
+                        NativeBridge.terminalSetScrollOffset(requested)
+                    } catch (t: Throwable) {
+                        requested
+                    }
                     currentScrollOffsetRows = clamped
                 }
             }
@@ -300,7 +320,11 @@ class WarpInputView @JvmOverloads constructor(
                         // scrollback.len() would otherwise leave
                         // `currentScrollOffsetRows` ahead of Rust by the
                         // overshoot until the user scrolls back.
-                        val clamped = NativeBridge.terminalSetScrollOffset(requested)
+                        val clamped = try {
+                            NativeBridge.terminalSetScrollOffset(requested)
+                        } catch (t: Throwable) {
+                            requested
+                        }
                         currentScrollOffsetRows = clamped
                     }
                     // Decay velocity. Reference iOS UIScrollView momentum
@@ -342,6 +366,80 @@ class WarpInputView @JvmOverloads constructor(
         isClickable = true
     }
 
+    private var customAccessibilityProvider: WarpAccessibilityNodeProvider? = null
+
+    fun setAccessibilityProvider(provider: WarpAccessibilityNodeProvider?) {
+        customAccessibilityProvider = provider
+    }
+
+    override fun getAccessibilityNodeProvider(): android.view.accessibility.AccessibilityNodeProvider {
+        var provider = customAccessibilityProvider
+        if (provider == null) {
+            provider = WarpAccessibilityNodeProvider(this)
+            customAccessibilityProvider = provider
+        }
+        return provider
+    }
+
+    var accessoryRow: AccessoryRow? = null
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        val result = HardwareKeyDecoder.decodeKeyEvent(event, isSelectionActive = false)
+        return when (result) {
+            is HardwareKeyDecoder.KeyDecodeResult.HandledBytes -> {
+                if (result.bytes.size == 1 && result.bytes[0] == 0x1B.toByte()) {
+                    dev.warp.mobile.clipboard.ChunkedPasteEngine.cancelPaste()
+                }
+                writeBytesToActivePty(context, result.bytes)
+                true
+            }
+            is HardwareKeyDecoder.KeyDecodeResult.PerformPaste -> {
+                accessoryRow?.startClipboardPaste() ?: performSystemPaste()
+                true
+            }
+            is HardwareKeyDecoder.KeyDecodeResult.PerformCopy -> {
+                copyVisibleToClipboard()
+                true
+            }
+            is HardwareKeyDecoder.KeyDecodeResult.NotHandled -> {
+                super.onKeyDown(keyCode, event)
+            }
+        }
+    }
+
+    override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if (keyCode == android.view.KeyEvent.KEYCODE_ESCAPE || keyCode == android.view.KeyEvent.KEYCODE_TAB) {
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+
+    private fun performSystemPaste() {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+        val clip = cm?.primaryClip
+        val text = if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(context).toString() else ""
+        if (text.isNotEmpty()) {
+            if (dev.warp.mobile.clipboard.PasteConfirmationDialog.shouldConfirm(text)) {
+                dev.warp.mobile.clipboard.PasteConfirmationDialog.show(context, text) { payload ->
+                    dev.warp.mobile.clipboard.ChunkedPasteEngine.streamPaste(context, payload, activePtyCmdId)
+                }
+            } else {
+                dev.warp.mobile.clipboard.ChunkedPasteEngine.streamPaste(context, text, activePtyCmdId)
+            }
+        }
+    }
+
+    private fun copyVisibleToClipboard() {
+        try {
+            val dump = NativeBridge.terminalBlocksDump()
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+            val clip = android.content.ClipData.newPlainText("Terminal Dump", dump)
+            cm?.setPrimaryClip(clip)
+        } catch (t: Throwable) {
+            Log.w(TAG, "copyVisibleToClipboard failed: ${t.message}")
+        }
+    }
+
     /**
      * M2-S11: touch event handler.
      *
@@ -366,7 +464,11 @@ class WarpInputView @JvmOverloads constructor(
                 velocityTracker?.recycle()
                 velocityTracker = VelocityTracker.obtain()
                 velocityTracker!!.addMovement(event)
-                NativeBridge.inputTouchDown(event.x, event.y)
+                try {
+                    NativeBridge.inputTouchDown(event.x, event.y)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "inputTouchDown failed: ${t.message}")
+                }
             }
             MotionEvent.ACTION_MOVE -> {
                 // Feed VelocityTracker BEFORE gestureDetector so that any
@@ -376,7 +478,11 @@ class WarpInputView @JvmOverloads constructor(
             }
             MotionEvent.ACTION_UP -> {
                 Log.i(TAG, "touch_up x=${event.x} y=${event.y}")
-                NativeBridge.inputTouchUp(event.x, event.y)
+                try {
+                    NativeBridge.inputTouchUp(event.x, event.y)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "inputTouchUp failed: ${t.message}")
+                }
                 velocityTracker?.recycle()
                 velocityTracker = null
             }
@@ -385,7 +491,11 @@ class WarpInputView @JvmOverloads constructor(
                 // sequence — without this, Rust would believe the finger is
                 // still down after a parent View intercepts the event stream.
                 Log.d(TAG, "touch_cancel x=${event.x} y=${event.y}")
-                NativeBridge.inputTouchCancel(event.x, event.y)
+                try {
+                    NativeBridge.inputTouchCancel(event.x, event.y)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "inputTouchCancel failed: ${t.message}")
+                }
                 velocityTracker?.recycle()
                 velocityTracker = null
             }
@@ -408,26 +518,7 @@ class WarpInputView @JvmOverloads constructor(
      * specialized mode (PIN, password, search, etc.).
      */
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-        // V1-prep iteration 20 (2026-05-02): user reported real Gboard typing
-        // still doesn't reach the shell despite iteration-19's commitText →
-        // PTY wiring. Root cause: TYPE_CLASS_TEXT | TEXT_FLAG_MULTI_LINE
-        // tells Gboard this is a normal text editor, so it puts each tap in
-        // the composing region (setComposingText) and only commits on
-        // space/enter/punctuation. Our PTY-write code only ran on commitText,
-        // so individual letter taps never reached mksh.
-        //
-        // Fix follows the Termux / Hacker's Keyboard / Termius pattern: the
-        // VISIBLE_PASSWORD variation + NO_SUGGESTIONS + NO_PERSONALIZED_LEARNING
-        // combo makes Gboard behave as a "raw key handler" — each tap commits
-        // immediately, no autocorrect, no input is sent to Google's predictive
-        // model (privacy hardening for shell commands).
-        //
-        // Refs:
-        //   https://developer.android.com/reference/android/text/InputType#TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-        //   https://github.com/termux/termux-app/blob/master/terminal-view/src/main/java/com/termux/view/TerminalView.java
         outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
-            EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
-            EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
             EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE
         outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI or
@@ -455,43 +546,37 @@ class WarpInputView @JvmOverloads constructor(
         fullEditor: Boolean
     ) : BaseInputConnection(view, fullEditor) {
 
-        // V1-prep iteration 22 (2026-05-02): track the most-recent composing
-        // region so setComposingText can write the DIFF to PTY rather than
-        // re-typing the whole region every keystroke. Real Gboard sends
-        // setComposingText("a"), setComposingText("ab"), … per tap; without
-        // diff-based forwarding the PTY would receive "a", "ab", "abc" =
-        // 6 chars typed for 3 keystrokes. With it the PTY receives just
-        // "a", "b", "c" — exactly what the user wanted.
-        //
-        // Autocorrect rewrite case (Gboard sometimes sends
-        // setComposingText("teh") then setComposingText("the")) is handled
-        // by the diff: the suffix that differs gets DEL-erased then the
-        // new suffix gets typed.
         private var lastComposingText: String = ""
+        private var pendingComposingText: String? = null
+        private val lineContextBuffer = StringBuilder()
 
-        // V1-prep iteration 35 (2026-05-03): scope the synthesized-from-
-        // commitText filter to a short time window AFTER super.commitText
-        // returns, instead of blanket-blocking all virtual-keyboard events.
-        //
-        // Background: BaseInputConnection.commitText synthesizes KeyEvents
-        // via KeyCharacterMap.getEvents — those events have deviceId =
-        // VIRTUAL_KEYBOARD (-1) and arrive at sendKeyEvent shortly after
-        // super.commitText returns. We must ignore them to avoid double-
-        // writing the bytes (commitText already forwarded the chars via
-        // forwardComposingDiff). Iter-19 implemented this filter.
-        //
-        // BUT: real soft-keyboard Enter / Backspace via sendKeyEvent
-        // (Gboard's actionDone, hardware-mapped soft keys, adb shell
-        // `input keyevent`) ALSO arrive with deviceId = VIRTUAL_KEYBOARD.
-        // The blanket filter dropped THOSE too, which is the user's
-        // "鍵盤按 Enter 沒反應 / 按 Backspace 沒反應" complaint.
-        //
-        // Fix: only treat virtual events as synthesized if they arrive
-        // within ~50ms after super.commitText returned. Real key events
-        // from a paused user (keystroke-to-Enter latency >> 50ms in normal
-        // typing) fall outside the window and reach the PTY.
         @Volatile
         private var commitTextSynthExpiresMs: Long = 0L
+
+        override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence? {
+            if (n <= 0) return ""
+            val currentContext = lineContextBuffer.toString()
+            if (currentContext.isNotEmpty()) {
+                val takeCount = n.coerceAtMost(currentContext.length)
+                val sub = currentContext.substring(currentContext.length - takeCount)
+                return if (flags and GET_TEXT_WITH_STYLES != 0) android.text.SpannableString(sub) else sub
+            }
+            val superRes = super.getTextBeforeCursor(n, flags)
+            return superRes ?: ""
+        }
+
+        private fun updateLineContext(text: String) {
+            if (text.contains("\n")) {
+                lineContextBuffer.clear()
+                val lastLine = text.substringAfterLast("\n")
+                lineContextBuffer.append(lastLine)
+            } else {
+                lineContextBuffer.append(text)
+                if (lineContextBuffer.length > 512) {
+                    lineContextBuffer.delete(0, lineContextBuffer.length - 512)
+                }
+            }
+        }
 
         /**
          * Diff a previous composing region against a new value and emit
@@ -505,17 +590,14 @@ class WarpInputView @JvmOverloads constructor(
             var i = 0
             val maxI = minOf(prev.length, next.length)
             while (i < maxI && prev[i] == next[i]) i++
+
             // Erase the part of prev past the common prefix using DEL (0x7F).
-            // For multi-byte (CJK) chars we need byte counts not char counts;
-            // use the trailing-suffix UTF-8 length since the shell treats
-            // each visible glyph as one cell but DEL deletes one byte unless
-            // the line editor is locale-aware. Most modern shells (zsh,
-            // bash with `set -o emacs`) handle wchar deletion correctly via
-            // termios + line discipline — DEL one per char.
-            val toErase = prev.length - i
-            if (toErase > 0) {
+            // Uses Unicode code point counts to prevent over-deleting surrogate pairs/emojis.
+            val textToErase = if (prev.length > i) prev.substring(i) else ""
+            val codePointCount = if (textToErase.isNotEmpty()) textToErase.codePointCount(0, textToErase.length) else 0
+            if (codePointCount > 0) {
                 try {
-                    val dels = ByteArray(toErase.coerceAtMost(256)) { 0x7F }
+                    val dels = ByteArray(codePointCount.coerceAtMost(256)) { 0x7F }
                     writeBytesToActivePty(view.context, dels)
                 } catch (t: Throwable) {
                     Log.w(TAG, "PTY composing-erase forward failed: ${t.message}")
@@ -538,34 +620,23 @@ class WarpInputView @JvmOverloads constructor(
                 TAG,
                 "IC.commitText text=${quote(s)} cursorPos=$newCursorPosition len=${s.length}"
             )
-            NativeBridge.imeCommitText(s, newCursorPosition)
-            // V1-prep iteration 22: emit the DIFF between the last composing
-            // region and the committed text. This handles three IME shapes
-            // uniformly:
-            //   1. Immediate-commit (Gboard with NO_SUGGESTIONS hint
-            //      respected): lastComposingText="" → write the full text.
-            //   2. After composing (Gboard committing a word): the chars
-            //      were already typed by setComposingText; here we only
-            //      type the delta (often nothing — the committed text
-            //      equals the last composing).
-            //   3. Autocorrect rewrite at commit time: prev composing
-            //      "teh" + commit "the" → erase "h" + "e" → type "h" + "e".
-            forwardComposingDiff(lastComposingText, s)
+            try {
+                NativeBridge.imeCommitText(s, newCursorPosition)
+            } catch (t: Throwable) {
+                Log.w(TAG, "imeCommitText failed: ${t.message}")
+            }
+            val prevComposing = if (lastComposingText.isNotEmpty()) lastComposingText else (pendingComposingText ?: "")
+            forwardComposingDiff(prevComposing, s)
             lastComposingText = ""
-            // M6 carry-over #1: forward to ghost-suggest controller for
-            // debounced auto-trigger. Controller filters / debounces /
-            // resets on Enter internally — a no-op when feature disabled.
+            pendingComposingText = null
+            updateLineContext(s)
+
             try {
                 GhostSuggestController.onTextCommitted(s)
             } catch (t: Throwable) {
                 Log.w(TAG, "GhostSuggest forward failed: ${t.message}")
             }
-            val result = super.commitText(text, newCursorPosition)
-            // V1-prep iteration 35: open the synthesized-event window so
-            // sendKeyEvent ignores BaseInputConnection's KeyCharacterMap
-            // synthesis for the next ~50ms. See doc on
-            // commitTextSynthExpiresMs above for why blanket-filtering by
-            // deviceId broke real soft-keyboard Enter / Backspace.
+            val result = super.commitText(if (text == null) "" else text, newCursorPosition)
             commitTextSynthExpiresMs = android.os.SystemClock.elapsedRealtime() + 50L
             return result
         }
@@ -574,39 +645,36 @@ class WarpInputView @JvmOverloads constructor(
             text: CharSequence?,
             newCursorPosition: Int
         ): Boolean {
-            // Strip Spanned styling — Rust state machine deals in plain
-            // strings only. This also lets us log a clean version.
             val s = text?.toString() ?: ""
             Log.i(
                 TAG,
                 "IC.setComposingText text=${quote(s)} cursorPos=$newCursorPosition len=${s.length} spanned=${text is Spanned}"
             )
-            NativeBridge.imeSetComposingText(s, newCursorPosition)
-            // V1-prep iteration 22: forward composing text to PTY via DIFF.
-            // Real Gboard composing → user sees each tap immediately reach
-            // the shell. Without this, only commit-time text reached PTY
-            // (= silent typing until space/punctuation/Enter).
-            forwardComposingDiff(lastComposingText, s)
+            try {
+                NativeBridge.imeSetComposingText(s, newCursorPosition)
+            } catch (t: Throwable) {
+                Log.w(TAG, "imeSetComposingText failed: ${t.message}")
+            }
+            val prevComposing = if (lastComposingText.isNotEmpty()) lastComposingText else (pendingComposingText ?: "")
+            forwardComposingDiff(prevComposing, s)
             lastComposingText = s
-            // M6 carry-over #1: forward composing text to ghost-suggest
-            // controller — round-1 ignores composing (CJK candidate
-            // previews would thrash); placeholder for round-2 wiring.
+            pendingComposingText = null
             try {
                 GhostSuggestController.onTextComposing(s)
             } catch (t: Throwable) {
                 Log.w(TAG, "GhostSuggest compose forward failed: ${t.message}")
             }
-            return super.setComposingText(text, newCursorPosition)
+            return super.setComposingText(if (text == null) "" else text, newCursorPosition)
         }
 
         override fun finishComposingText(): Boolean {
             Log.i(TAG, "IC.finishComposingText")
-            NativeBridge.imeFinishComposingText()
-            // V1-prep iteration 22: composing region is being abandoned
-            // without a commit. The chars were already typed via
-            // setComposingText forwarding; finishComposingText doesn't
-            // need to write anything more. Just reset the tracker so the
-            // next setComposingText starts from a clean slate.
+            try {
+                NativeBridge.imeFinishComposingText()
+            } catch (t: Throwable) {
+                Log.w(TAG, "imeFinishComposingText failed: ${t.message}")
+            }
+            pendingComposingText = lastComposingText
             lastComposingText = ""
             return super.finishComposingText()
         }

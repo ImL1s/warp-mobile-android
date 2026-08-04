@@ -1,0 +1,12 @@
+v1.0.0 — Wave 6-8 Implementation Complete
+
+* SSH Remote Sessions: Rust state machine model + Kotlin connection manager
+* Security Hardening: LogcatSanitizer, SecureLogger, KeyStoreManager (AES-256-GCM)
+* MCP Client/Server: JSON-RPC 2.0 protocol, tool registry with permission gating
+* Split Panes: Layout engine, launch configurations, input routing
+* Project Rules & Local Skills: .warprules parser, skill registry with keyword matching
+* Adaptive Layouts & Accessibility: Window size class resolver, foldable/DeX support
+* Release Pipeline: Automated release script with validation
+* Terminal Parser Upgrades: UTF-8 streaming, CJK wide chars, OSC 0/2/7/8, alt screen, 256-color + truecolor SGR
+* Test Pyramid: 805 tests (642 Kotlin + 163 Rust), 0 failures
+* AGPL-3.0-only

@@ -84,19 +84,14 @@ class AccessoryRow @JvmOverloads constructor(
         setSingleLine(true)
         ellipsize = android.text.TextUtils.TruncateAt.END
         visibility = View.GONE
+        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+        contentDescription = "AI Suggestion strip"
     }
     private val horizontalScroll: HorizontalScrollView = HorizontalScrollView(context).apply {
         isFillViewport = false
     }
     private val rowLayout: LinearLayout = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
-        // ViewGroup.LayoutParams (vs FrameLayout.LayoutParams or
-        // HorizontalScrollView.LayoutParams) — round-3 review LOW.
-        // The parent will be horizontalScroll (a HorizontalScrollView),
-        // which subclasses FrameLayout, but ViewGroup.LayoutParams is
-        // the broadest correct type and avoids the misleading dependency
-        // on parent-class internals. width/height are honored by all
-        // FrameLayout-derived parents.
         layoutParams = ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -144,9 +139,6 @@ class AccessoryRow @JvmOverloads constructor(
                         ghostStrip.visibility = View.VISIBLE
                     }
                     "thinking" -> {
-                        // Only show "thinking" if we already have a buffer
-                        // worth showing to avoid a UI flicker on every
-                        // single keystroke. >= 4 chars feels right.
                         if (state.buffer.length >= 4) {
                             ghostStrip.text = "💡 thinking…"
                             ghostStrip.visibility = View.VISIBLE
@@ -167,12 +159,6 @@ class AccessoryRow @JvmOverloads constructor(
 
     private val connectivityListener = object : AiConnectivity.Listener {
         override fun onConnectivityChanged(online: Boolean) {
-            // Listener fires on a Binder thread when the network
-            // changes — marshal to the View's UI thread before
-            // touching button state (Android UI invariant).
-            // Safe even if View is mid-detach: post() is a no-op on
-            // detached Views, and in-memory property writes on
-            // detached child Views are harmless. Round-3 review LOW.
             post {
                 listOfNotNull(ghostButton, agentButton).forEach { btn ->
                     btn.isEnabled = online
@@ -186,8 +172,6 @@ class AccessoryRow @JvmOverloads constructor(
         orientation = LinearLayout.VERTICAL
         setBackgroundColor(0xFF202020.toInt())
 
-        // Wire the ghost strip's onClick now (couldn't do it at field
-        // declaration because acceptGhostSuggestion is a member fn).
         ghostStrip.setOnClickListener { acceptGhostSuggestion() }
         addView(
             ghostStrip,
@@ -208,72 +192,29 @@ class AccessoryRow @JvmOverloads constructor(
         buildButtons()
     }
 
-    /**
-     * Build all the static buttons in left-to-right order. Each button:
-     * - shows a glyph
-     * - on click, calls `sendBytes()` with the right escape sequence
-     */
     private fun buildButtons() {
-        // Order chosen by frequency in shell day-to-day:
-        // modifiers first, then escape/tab, then arrows, then common
-        // shell punctuation. Mic is rightmost — M5-S04 voice input.
         addBtn("Esc")  {
-            // M6-S03 round-4: ESC also cancels any in-flight AI stream.
-            // No-op if no stream is running (cancelActiveStream early-
-            // returns on activeStreamHandle==0). User-visible behavior:
-            // tapping ESC during a streaming AI response stops the
-            // stream + sends ESC byte to PTY (consistent dual purpose
-            // matches Termux's ESC behavior).
-            // M6-CO1: ESC also dismisses the ghost-suggestion strip.
             cancelActiveStream()
+            cancelPaste()
             try { GhostSuggestController.dismissSuggestion() } catch (_: Throwable) {}
             sendBytes(byteArrayOf(0x1B))
         }
         addBtn("Tab")  {
-            // M6-CO1: if a ghost suggestion is ready, accept it
-            // instead of sending the Tab byte. The controller returns
-            // the suffix (suggestion - already-typed prefix) so the
-            // PTY sees only the new bytes, exactly as if the user
-            // had typed them. Falls back to plain Tab when no
-            // suggestion is active.
             if (!acceptGhostSuggestion()) {
                 sendBytes(byteArrayOf(0x09))
             }
         }
         ctrlButton = addBtn("Ctrl") { ctrlPending = !ctrlPending }
         altButton  = addBtn("Alt")  { altPending  = !altPending }
-        // Arrow keys send CSI sequences: ESC [ A/B/C/D for up/down/right/left.
-        addBtn("↑") { sendBytes("[A".toByteArray()) }
-        addBtn("↓") { sendBytes("[B".toByteArray()) }
-        addBtn("←") { sendBytes("[D".toByteArray()) }
-        addBtn("→") { sendBytes("[C".toByteArray()) }
-        // Punctuation that mobile keyboards usually require a symbol-mode
-        // round-trip to type. Adding them inline saves several taps for
-        // common shell pipelines.
-        for (sym in listOf("|", "/", "~", "-", "$", "*", "&", "!", "?", ".")) {
+        addBtn("↑") { sendBytes(" [A".toByteArray()) }
+        addBtn("↓") { sendBytes(" [B".toByteArray()) }
+        addBtn("←") { sendBytes(" [D".toByteArray()) }
+        addBtn("→") { sendBytes(" [C".toByteArray()) }
+        for (sym in listOf("|", "/", "~", "-", "`", "$", "*", "&", "!", "?", ".")) {
             addBtn(sym) { sendBytes(sym.toByteArray()) }
         }
-        // M5-S01: "Copy All" button — flattens all visible terminal blocks
-        // (via NativeBridge.terminalBlocksDump) to plain text and writes
-        // to Android ClipboardManager. Interactive cell-range selection
-        // is v1-release scope; the round-1 label is "Copy All" (not just
-        // "Copy") so users aren't misled into expecting selection-aware
-        // behavior — that comes when v1 wires the Selection state machine
-        // (warp_mobile_android_link::selection) to touch dispatch + this
-        // button (per M5-S08 §4 carry-forward).
         addBtn("Copy All") { copyVisibleToClipboard() }
-        // M5-S04: Paste button — pulls from Android ClipboardManager and
-        // streams to PTY in 4 KB chunks with 1ms gaps so the PTY's read
-        // buffer doesn't overflow on long pastes (10K+ chars). ESC during
-        // streaming cancels the in-flight paste.
         addBtn("Paste") { startClipboardPaste() }
-        // M5-S03 round-2: BottomSheet UI scaffold. Opens BlockActionsSheet
-        // showing the most-recent terminal block + Copy / Re-run / Explain.
-        // The Explain button forwards real Block context (command + output)
-        // to AgentBlockSheet, closing the M6-S04 round-2 carry-over.
-        // Round-3 will wire long-press on the SurfaceView with cell-coord
-        // hit-test to per-block selection (depends on M5-S03 GestureRecognizer
-        // touch dispatch — currently state-machine only).
         addBtn("📋") {
             BlockActionsSheet(
                 context,
@@ -281,11 +222,6 @@ class AccessoryRow @JvmOverloads constructor(
                 cmdId = cmdId,
             ).show()
         }
-        // M6-S02: in-app entry point to BYOK SettingsActivity. Required
-        // so SettingsActivity can stay android:exported="false" (security
-        // review MEDIUM #4) — without an in-app launch path, users (and
-        // adb) couldn't reach it. Explicit Intent + setClass works
-        // regardless of exported flag because it's a same-process launch.
         addBtn("⚙") {
             val intent = Intent().apply {
                 setClass(context, SettingsActivity::class.java)
@@ -293,44 +229,20 @@ class AccessoryRow @JvmOverloads constructor(
             }
             context.startActivity(intent)
         }
-        // M6-S03: AI ghost-suggest button (manual one-shot trigger).
-        // Sends a hardcoded "suggest a shell completion for 'ls -'"
-        // prompt to Claude Haiku via the warp_ai_mobile Rust crate
-        // (synchronous round-trip). The result is shown as a Toast
-        // AND inserted into the PTY as a one-shot "echo SUGGESTION:..."
-        // line so users can see it in their terminal scrollback.
-        //
-        // This sits alongside the M6-CO1 IME-driven debounced auto-
-        // trigger (GhostSuggestController, with the ghostStrip above
-        // and Tab-accept on this row's Tab button) — manual button +
-        // typing-driven controller are intentionally both available.
         ghostButton = addBtn("💡") { triggerAiSuggest() }
-        // M6-S04: agent task button. Opens AgentBlockSheet (Dialog
-        // with streaming Sonnet response). The button itself uses a
-        // hardcoded prompt; the 📋 BlockActionsSheet's Explain button
-        // (M6-S04 round-2 / commit 06c86d7) forwards real Block context
-        // (command + exit_code + captured output as XML-tagged content)
-        // for Block-aware "explain this" flows.
         agentButton = addBtn("🤖") { triggerAgentTask() }
-        // Mic placeholder for M5-S04. Voice input via RecognizerIntent is a
-        // future enhancement (need explicit RECORD_AUDIO permission flow);
-        // round-1 ships paste streaming as the headline M5-S04 feature.
         addBtn("🎤") {
             Log.i(LOG_TAG, "voice input button (RecognizerIntent — v1-release)")
         }
     }
 
-    /**
-     * Add a single labelled button to the row. Returns the view so callers
-     * can keep a reference (used by Ctrl / Alt for the modifier-visual
-     * refresh path).
-     */
-    @SuppressLint("SetTextI18n")
     private fun addBtn(label: String, onClick: () -> Unit): Button {
         val btn = Button(context).apply {
             text = label
-            // Compact button sizing so 15+ buttons fit on a single
-            // horizontal-scrolling row without wrapping.
+            isFocusable = false
+            isFocusableInTouchMode = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+            contentDescription = label
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setPadding(dp(12), dp(6), dp(12), dp(6))
             setBackgroundColor(0xFF303030.toInt())
@@ -338,9 +250,6 @@ class AccessoryRow @JvmOverloads constructor(
             minWidth = dp(40)
             minHeight = dp(36)
             setOnClickListener {
-                // For non-modifier keys, apply pending Ctrl/Alt then run the
-                // action's bytes. The action closure already calls
-                // sendBytes which honours the pending modifiers.
                 onClick()
             }
         }
@@ -413,11 +322,27 @@ class AccessoryRow @JvmOverloads constructor(
             ctrlButton.setBackgroundColor(
                 if (ctrlPending) 0xFF005A9E.toInt() else 0xFF303030.toInt()
             )
+            ctrlButton.accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.isCheckable = true
+                    info.isChecked = ctrlPending
+                    info.stateDescription = if (ctrlPending) "Control active" else "Control inactive"
+                }
+            }
         }
         if (::altButton.isInitialized) {
             altButton.setBackgroundColor(
                 if (altPending) 0xFF005A9E.toInt() else 0xFF303030.toInt()
             )
+            altButton.accessibilityDelegate = object : View.AccessibilityDelegate() {
+                override fun onInitializeAccessibilityNodeInfo(host: View, info: android.view.accessibility.AccessibilityNodeInfo) {
+                    super.onInitializeAccessibilityNodeInfo(host, info)
+                    info.isCheckable = true
+                    info.isChecked = altPending
+                    info.stateDescription = if (altPending) "Alt active" else "Alt inactive"
+                }
+            }
         }
     }
 
@@ -448,13 +373,8 @@ class AccessoryRow @JvmOverloads constructor(
      * stream is cancelled FIRST. Without this, two streams interleaved
      * on the same Handler queue would produce garbled PTY input.
      */
-    private fun startClipboardPaste() {
-        // Cancel any in-flight stream before reading new clipboard
-        // content. Cheap idempotent op — sets the flag + drops scheduled
-        // postDelayed callbacks so the next chunk dispatch becomes a
-        // no-op before we issue any new ones.
+    fun startClipboardPaste() {
         cancelPaste()
-
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             ?: run {
                 Log.w(LOG_TAG, "paste: ClipboardManager unavailable")
@@ -471,61 +391,18 @@ class AccessoryRow @JvmOverloads constructor(
             Log.i(LOG_TAG, "paste: clipboard text empty")
             return
         }
-        val bytes = text.toByteArray(Charsets.UTF_8)
-        Log.i(LOG_TAG, "paste: starting stream of ${bytes.size} bytes")
-        pasteCanceled = false
-        streamPasteChunked(bytes, 0)
+        
+        if (dev.warp.mobile.clipboard.PasteConfirmationDialog.shouldConfirm(text)) {
+            dev.warp.mobile.clipboard.PasteConfirmationDialog.show(context, text) { payload ->
+                dev.warp.mobile.clipboard.ChunkedPasteEngine.streamPaste(context, payload, cmdId)
+            }
+        } else {
+            dev.warp.mobile.clipboard.ChunkedPasteEngine.streamPaste(context, text, cmdId)
+        }
     }
 
-    /**
-     * Recursive chunked stream: each step writes up to CHUNK_BYTES from
-     * `data` starting at `offset` and posts itself to fire 1 ms later
-     * for the next chunk. Honors `pasteCanceled` between chunks.
-     */
-    private fun streamPasteChunked(data: ByteArray, offset: Int) {
-        if (pasteCanceled) {
-            Log.i(LOG_TAG, "paste: canceled at offset=$offset of ${data.size}")
-            return
-        }
-        if (offset >= data.size) {
-            Log.i(LOG_TAG, "paste: complete (${data.size} bytes streamed)")
-            return
-        }
-        val end = (offset + CHUNK_BYTES).coerceAtMost(data.size)
-        val chunk = data.copyOfRange(offset, end)
-        // Send chunk via the existing PTY_WRITE broadcast — same pipeline
-        // sendBytes() uses for keystrokes. Targets PtyBroadcastReceiver
-        // explicitly (not setPackage) to avoid the double-dispatch bug
-        // (see sendBytes() comment).
-        val intent = Intent(WarpTerminalService.ACTION_WRITE).apply {
-            component = ComponentName(context.packageName, "${context.packageName}.PtyBroadcastReceiver")
-            putExtra("cmd_id", cmdId)
-            putExtra("data", chunk)
-        }
-        context.sendBroadcast(intent)
-        // Schedule next chunk after CHUNK_DELAY_MS so the PTY child can
-        // drain. 1 ms is conservative; 10K bytes / 4 KB chunks = 3 chunks
-        // = ~3 ms total streaming time on flagship.
-        pasteHandler.postDelayed({ streamPasteChunked(data, end) }, CHUNK_DELAY_MS)
-    }
-
-    /**
-     * Cancel any in-flight paste stream. Wired to ESC button so a user
-     * can abort if they realize they pasted the wrong thing. Also
-     * called by `startClipboardPaste` to prevent stream re-entry races.
-     */
     fun cancelPaste() {
-        pasteCanceled = true
-        pasteHandler.removeCallbacksAndMessages(null)
-    }
-
-    companion object {
-        // 4 KB matches the canonical Linux PTY line buffer; one chunk
-        // typically fits in the PTY without triggering EWOULDBLOCK.
-        private const val CHUNK_BYTES = 4096
-        // 1 ms gap is enough for the child's read loop to drain on
-        // flagship; mid-tier devices may need 2-3 ms (tunable later).
-        private const val CHUNK_DELAY_MS = 1L
+        dev.warp.mobile.clipboard.ChunkedPasteEngine.cancelPaste()
     }
 
     // ── M5-S01: copy visible terminal blocks to clipboard ───────────────

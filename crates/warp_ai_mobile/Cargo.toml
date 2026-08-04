@@ -1,6 +1,6 @@
 [package]
 name = "warp_ai_mobile"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Warp Mobile Android — Anthropic Claude API client (BYOK ghost-text + agent task)"

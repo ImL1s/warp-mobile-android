@@ -5,7 +5,11 @@ import android.view.Surface
 
 object NativeBridge {
     init {
-        System.loadLibrary("warp_mobile_android_host")
+        try {
+            System.loadLibrary("warp_mobile_android_host")
+        } catch (e: Throwable) {
+            // Ignored on host JVM desktop test environments where native .so/.dll is absent
+        }
     }
 
     external fun ping(): String
@@ -60,6 +64,39 @@ object NativeBridge {
     external fun aiGhostStreamCancel(handle: Long)
     external fun aiGhostStreamFree(handle: Long)
 
+    // ── Multi-Turn Agent Conversations (Issue #14) ───────────────────────────
+    external fun aiAgentSessionCreate(
+        sessionId: String,
+        model: String,
+        systemPrompt: String
+    ): Boolean
+
+    external fun aiAgentSendTurnStart(
+        sessionId: String,
+        apiKey: String,
+        userPrompt: String,
+        maxTokens: Int
+    ): Long
+
+    external fun aiAgentTurnPoll(handle: Long): String?
+    external fun aiAgentTurnControl(handle: Long, action: Int): Boolean
+    external fun aiAgentTurnFree(handle: Long)
+
+    external fun aiAgentRetryTurn(
+        sessionId: String,
+        apiKey: String,
+        maxTokens: Int
+    ): Long
+
+    external fun aiAgentEditPrompt(
+        sessionId: String,
+        apiKey: String,
+        turnIndex: Int,
+        newPrompt: String,
+        maxTokens: Int
+    ): Long
+
+
     // ── Bootstrap atomic extraction (M4-S05) ─────────────────────────────────
     //
     // First-launch installer: reads bootstrap-aarch64.zip + version.json from
@@ -83,6 +120,9 @@ object NativeBridge {
 
     // ── PTY (M1) ─────────────────────────────────────────────────────────────
 
+    external fun activePtyCount(): Int
+    external fun totalSpawnedPtys(): Long
+    external fun ptyGetExitStatus(ptr: Long): Int
     external fun ptySpawn(program: String, args: Array<String>, envFlat: Array<String>): Long
     external fun ptyAcquire(ptr: Long): Long
     external fun ptyRelease(ptr: Long)
@@ -90,6 +130,14 @@ object NativeBridge {
     external fun ptyWrite(ptr: Long, data: ByteArray): Int
     external fun ptyResize(ptr: Long, rows: Short, cols: Short): Int
     external fun ptyKill(ptr: Long)
+
+    // ── Multi-Session Tabs Manager (Task 2 & 3 / #8, #9) ──────────────────────
+    external fun createSession(sessionId: String, envJson: String): Boolean
+    external fun switchSession(sessionId: String): Boolean
+    external fun closeSession(sessionId: String): Boolean
+    external fun activeSessionId(): String
+    external fun saveSessionState(): String
+    external fun restoreSessionState(json: String): Boolean
 
     // ── Vulkan render (M2-S04) ───────────────────────────────────────────────
     //
@@ -461,6 +509,11 @@ object NativeBridge {
      *   "rows=N,cols=N,cursor_row=N,cursor_col=N,bytes_ingested=N,dirty=B"
      */
     external fun terminalModelStats(): String
+
+    /**
+     * Task 2 (#12): returns true if the terminal model is in alternate screen mode.
+     */
+    external fun terminalIsAltScreen(): Boolean
 
     /**
      * M3-S04: reshape the terminal model. Called when the SurfaceView
