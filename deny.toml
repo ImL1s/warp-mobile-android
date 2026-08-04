@@ -23,6 +23,11 @@ targets = [
     { triple = "x86_64-apple-darwin" },     # dev host (macOS)
     { triple = "x86_64-unknown-linux-gnu" }, # CI host (ubuntu-latest)
 ]
+# Exclude warp-src companion workspace crates — their workspace
+# manifest uses dep inheritance that can't resolve in isolation.
+# The main-repo Cargo.lock is the authoritative dep graph for
+# what ships in the APK; warp-src tests use their own workspace.
+exclude = ["warp_terminal_mobile_facade"]
 
 [advisories]
 # Same advisory DB as `cargo audit`. We deny vulnerabilities + unmaintained

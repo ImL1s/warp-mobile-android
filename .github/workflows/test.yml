@@ -124,7 +124,7 @@ jobs:
       - name: License + supply-chain check (cargo deny)
         # Enforces AGPL-3.0 compatibility on every dep; rejects unknown
         # registries / git sources; warns on duplicate-version trees.
-        # Config: deny.toml at repo root.
+        # Config: deny.toml at repo root (excludes warp-src companion crates).
         run: cargo deny check
 
       - name: Test warp-mobile-android-host (66 tests)
