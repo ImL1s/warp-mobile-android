@@ -8,7 +8,7 @@ Open-source-first port of [Warp Terminal](https://github.com/warpdotdev/Warp) to
 
 See [`README.md`](README.md) for product description and architecture overview.
 
-## Current milestone state (2026-05-02)
+## Current milestone state (2026-08-04)
 
 - **M0** (foundation spike): CLOSED CONDITIONAL GO @ commit `24a2c1c`
 - **M1** (Android PTY/Service prototype): CLOSED CONDITIONAL GO @ commit `f7feb3f`, **10/10 stories PASS**
@@ -16,10 +16,12 @@ See [`README.md`](README.md) for product description and architecture overview.
 - **M3** (Layer 2b integration: facade + DCS + Block + dynamic_grid): CLOSED CONDITIONAL GO @ commit `8ec75c8`, **12/12 stories PASS** (27 codex rounds; Plan Amendment 5 cfg-gate→extraction pivot)
 - **M4** (Termux runtime: zsh + GNU coreutils + APT): CLOSED CONDITIONAL GO @ commit `de26e3a`, **14/15 PASS** (M4-S14 closed in v1-prep follow-up @ `1e732c5`)
 - **M5** (Mobile UX: selection / accessory row / blocks / paste / UX review): CLOSED CONDITIONAL GO PARTIAL @ commit `5665b2f`, **5/8 PASS** (M5-S03 BottomSheet UI scaffold landed in v1-prep @ `06c86d7`; M5-S05 user-deferred; M5-S06+S07 v1 backlog)
-- **M6** (AI integration: BYOK + ghost-text + agent + telemetry): **CLOSED CONDITIONAL GO** @ commit `40954d7`, **7/7 stories PASS**, **all 4 carry-overs closed same-day** @ `8c3ffa1` + `06c86d7` + `4f010c7` + `dcce36f`
-- **v1-release prep**: ACTIVE — signing config + version 0.6.0-m6 (`245f05a`), release packaging script + GHA workflow (`9fd3584`), Block.output capture (`fea4aed`), color emoji COLR v1 diagnosis (`452e3c5`), GhostSuggestController self-cancel-cascade fix (`c1dc07a`)
+- **M-W1–W8** (Foundation through Wave 8): ALL COMPLETED — Issues #6, #19, #22-#25, #28-#30 implemented.
+  - **805 tests** (642 Kotlin JVM + 163 Rust), 0 failures
+  - 77 Kotlin source files across 10 modules (ai, clipboard, editor, mcp, panes, search, security, skills, ssh, ui)
+  - Terminal parser upgraded: UTF-8 streaming, CJK wide chars, OSC 0/2/7/8, alt screen, 256-color + truecolor SGR
 
-To verify currency: `git log --oneline -10` and check `.omc/prd.json` `passes` fields. Current `versionName = "0.6.0-m6"` / `versionCode = 6`.
+To verify currency: `git log --oneline -10` and check canonical `PROJECT.md` ledger. Current `versionName = "1.0.0"` / `versionCode = 100`.
 
 ## How to resume / pick up work
 
@@ -100,23 +102,20 @@ If you don't have the OMC plugin, you can still:
 ## Quick verification commands
 
 ```bash
-# Verify all 12 M3 stories PASS
-jq -r '.stories | map(select(.passes == true)) | length' .omc/prd.json   # → 12
-jq -r '.stories | length' .omc/prd.json                                   # → 12
+# Rust tests (163 total)
+cargo test -p warp-mobile-android-host                                    # → 29 passed
+cargo test -p warp_ai_mobile --lib                                        # → 45 passed
+cargo test -p warp_terminal_mobile_facade --manifest-path warp-src/Cargo.toml  # → 89 passed
 
-# Confirm latest M3 close-out commits
-git log --oneline -10
+# Kotlin JVM tests (642 total)
+cd android && JAVA_HOME="/path/to/jdk-21" ./gradlew :app:testDebugUnitTest # → 642 passed, 0 failures
 
-# Build sanity check
-cargo test -p warp-mobile-android-host                                    # → 45 passed (M3-S11 added 3 emoji smoke tests)
-cargo test -p warp_terminal_mobile_facade --manifest-path warp-src/Cargo.toml  # → 73 passed
+# Full compilation check
+cd android && ./gradlew :app:compileDebugKotlin                            # → BUILD SUCCESSFUL
 
-# Release APK size verification (M3-S10 baseline 7.4MB)
+# Release APK size verification
 cd android && ./gradlew :app:assembleRelease
-du -h app/build/outputs/apk/release/app-release-unsigned.apk              # → 7.4M
-
-# Connected devices (your serials will differ)
-adb devices                                                                # → Galaxy S24 Ultra R5CX10VFFBA primary
+du -h app/build/outputs/apk/release/app-release-unsigned.apk              # → ~53.7M
 ```
 
 ## What you should NOT do
