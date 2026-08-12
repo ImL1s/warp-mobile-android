@@ -47,6 +47,10 @@ pub mod input;
 #[cfg(target_os = "android")]
 use warp_mobile_android_link::{dynamic_grid, static_grid};
 
+// Process-wide multi-session registry (android-host local — pinned facade
+// 0f704db does not ship session_registry::{SessionManager, SessionHandle}).
+pub mod session_registry;
+
 // M3-S04: terminal model. Pure Rust + atomics (mirrors the canonical facade
 // `warp_terminal_mobile_facade::render::TerminalModel`); built on host targets
 // too so `cargo test -p warp-mobile-android-host` exercises ingest/dirty/snapshot.
@@ -2017,7 +2021,7 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_createSession(
     let env_map: std::collections::HashMap<String, String> =
         serde_json::from_str(&env_json_str).unwrap_or_default();
 
-    match warp_terminal_mobile_facade::SessionManager::global().create_session(
+    match crate::session_registry::SessionManager::global().create_session(
         &session_id_str,
         Some(&session_id_str),
         Some("~"),
@@ -2050,7 +2054,7 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_switchSession(
         Err(_) => return jni::sys::JNI_FALSE,
     };
 
-    match warp_terminal_mobile_facade::SessionManager::global().switch_session(&session_id_str) {
+    match crate::session_registry::SessionManager::global().switch_session(&session_id_str) {
         Ok(_) => {
             log::info!(target: "WarpTerminalModel", "switchSession ok id={}", session_id_str);
             jni::sys::JNI_TRUE
@@ -2076,7 +2080,7 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_closeSession(
         Err(_) => return jni::sys::JNI_FALSE,
     };
 
-    match warp_terminal_mobile_facade::SessionManager::global().close_session(&session_id_str) {
+    match crate::session_registry::SessionManager::global().close_session(&session_id_str) {
         Ok(_) => {
             log::info!(target: "WarpTerminalModel", "closeSession ok id={}", session_id_str);
             jni::sys::JNI_TRUE
@@ -2095,7 +2099,7 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_activeSessionId(
     env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    let id = warp_terminal_mobile_facade::SessionManager::global()
+    let id = crate::session_registry::SessionManager::global()
         .active_session_id()
         .unwrap_or_else(|| "default".to_string());
     env.new_string(id)
@@ -2111,7 +2115,7 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_saveSessionState(
     _class: JClass,
 ) -> jstring {
     init_logger();
-    let json = match warp_terminal_mobile_facade::SessionManager::global().export_session_state_json() {
+    let json = match crate::session_registry::SessionManager::global().export_session_state_json() {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "WarpTerminalModel", "saveSessionState failed: {:?}", e);
@@ -2137,7 +2141,7 @@ pub extern "C" fn Java_dev_warp_mobile_NativeBridge_restoreSessionState(
         Err(_) => return jni::sys::JNI_FALSE,
     };
 
-    match warp_terminal_mobile_facade::SessionManager::global().restore_session_state_json(&json_str) {
+    match crate::session_registry::SessionManager::global().restore_session_state_json(&json_str) {
         Ok(_) => {
             log::info!(target: "WarpTerminalModel", "restoreSessionState ok");
             jni::sys::JNI_TRUE

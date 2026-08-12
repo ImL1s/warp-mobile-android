@@ -21,7 +21,7 @@ pub use warp_terminal_mobile_facade::render::{
     SCROLLBACK_MAX_LINES,
 };
 
-pub use warp_terminal_mobile_facade::session_registry::{SessionHandle, SessionManager};
+pub use crate::session_registry::{SessionHandle, SessionManager};
 
 pub fn active_model() -> Arc<TerminalModel> {
     if let Some(session) = SessionManager::global().active_session() {
@@ -49,7 +49,11 @@ pub fn global_model() -> Arc<TerminalModel> {
 }
 
 pub fn ingest_pty_bytes(bytes: &[u8]) -> usize {
-    active_model().ingest_pty_bytes(bytes)
+    let model = active_model();
+    if let Some(session) = SessionManager::global().active_session() {
+        session.track_alt_screen_from_bytes(bytes);
+    }
+    model.ingest_pty_bytes(bytes)
 }
 
 pub fn ingest_pty_bytes_for_session(cmd_id: &str, bytes: &[u8]) -> usize {
@@ -112,7 +116,12 @@ pub fn scrollback_max_lines() -> usize {
 }
 
 pub fn is_alt_screen() -> bool {
-    active_model().is_alt_screen()
+    // Facade TerminalModel at pin 0f704db has no is_alt_screen(); track via
+    // SessionHandle best-effort DECSET/DECRST scanner updated on ingest.
+    SessionManager::global()
+        .active_session()
+        .map(|s| s.is_alt_screen())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -281,20 +290,21 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "DECSET 1049 alt-screen tracking not yet implemented in facade parser"]
     fn terminal_model_is_alt_screen_toggles_on_decset_1049() {
         let _guard = lock_global_session_test();
         let mgr = SessionManager::global();
         mgr.clear();
 
-        let s1 = mgr
+        let _s1 = mgr
             .create_session("sess-1", Some("Tab 1"), Some("/home"), std::collections::HashMap::new(), DEFAULT_ROWS, DEFAULT_COLS)
             .unwrap();
 
         assert!(!is_alt_screen());
-        s1.model().ingest_pty_bytes(b"\x1b[?1049h");
+        mgr.ingest_pty_bytes_for_session("sess-1", b"\x1b[?1049h")
+            .unwrap();
         assert!(is_alt_screen());
-        s1.model().ingest_pty_bytes(b"\x1b[?1049l");
+        mgr.ingest_pty_bytes_for_session("sess-1", b"\x1b[?1049l")
+            .unwrap();
         assert!(!is_alt_screen());
 
         mgr.clear();
