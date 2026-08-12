@@ -35,12 +35,12 @@ Every feature for issues #6 through #30 mapped into implementation waves.
 | 17 | Hardened IME, Keyboard & Clipboard | #18 | Wave 5 | Gboard CJK composing, hardware keyboard shortcuts, AccessoryRow, chunked paste | M-W5 | survey | COMPLETED |
 | 18 | Adaptive Layouts & Accessibility | #19 | Wave 5 | Phone/Tablet/DeX/Foldable responsive layouts, TalkBack `AccessibilityNodeProvider` | M-W5 | survey | COMPLETED |
 | 19 | Secure SSH Remote Sessions | #22 | Wave 5 | Native Rust SSH connector (`russh`), password/key auth, host-key verification dialog | M-W5 | survey | COMPLETED |
-| 20 | Component, Secret & Supply Hardening | #23 | Wave 6 | `exported=false`, KeyStore encryption, logcat sanitization, cargo audit security | M-W6 | survey | PLANNED |
-| 21 | Deterministic Test Pyramid | #24 | Wave 6 | Kotlin JVM unit tests, Compose UI tests, device stress scripts, accessibility scans | M-W6 | survey | PLANNED |
-| 22 | Reproducible Release Pipeline | #25 | Wave 7 | Signed reproducible APKs, F-Droid recipe verification, 24h soak test pipeline | M-W7 | survey | PLANNED |
-| 23 | Project Rules & Local Skills | #28 | Wave 8 | Project rules engine (`.warprules`), local skills directory (`.warp/skills/`) for AI | M-W8 | survey | PLANNED |
-| 24 | Permissioned MCP Client/Server Manager | #29 | Wave 8 | MCP JSON-RPC manager (stdio/SSE/HTTP), tool execution permission prompts | M-W8 | survey | PLANNED |
-| 25 | Split Panes & Launch Configurations | #30 | Wave 8 | Multi-pane terminal viewports, saved workspace launch configs (`launch.json`) | M-W8 | survey | PLANNED |
+| 20 | Component, Secret & Supply Hardening | #23 | Wave 6 | `exported=false`, KeyStore encryption, logcat sanitization, cargo audit security | M-W6 | survey | COMPLETED |
+| 21 | Deterministic Test Pyramid | #24 | Wave 6 | Kotlin JVM unit tests, Compose UI tests, device stress scripts, accessibility scans | M-W6 | survey | COMPLETED |
+| 22 | Reproducible Release Pipeline | #25 | Wave 7 | Signed reproducible APKs, F-Droid recipe verification, 24h soak test pipeline | M-W7 | survey | COMPLETED |
+| 23 | Project Rules & Local Skills | #28 | Wave 8 | Project rules engine (`.warprules`), local skills directory (`.warp/skills/`) for AI | M-W8 | survey | COMPLETED |
+| 24 | Permissioned MCP Client/Server Manager | #29 | Wave 8 | MCP JSON-RPC manager (stdio/SSE/HTTP), tool execution permission prompts | M-W8 | survey | COMPLETED |
+| 25 | Split Panes & Launch Configurations | #30 | Wave 8 | Multi-pane terminal viewports, saved workspace launch configs (`launch.json`) | M-W8 | survey | COMPLETED |
 
 ## Milestones
 
@@ -51,9 +51,9 @@ Every feature for issues #6 through #30 mapped into implementation waves.
 | 3 | M-W3: Block Timeline UI & Terminal Compatibility | #11, #12, #26, #20 | M-W2 | COMPLETED |
 | 4 | M-W4: Agent Foundation & AI Safety | #14, #15 | M-W3 | COMPLETED |
 | 5 | M-W5: Product UI/UX, Connectors & Accessibility | #13, #16, #17, #18, #19, #22 | M-W3 | COMPLETED |
-| 6 | M-W6: Hardening & Test Pyramid | #23, #24 | M-W4, M-W5 | PLANNED |
-| 7 | M-W7: Reproducible Release Pipeline | #25 | M-W6 | PLANNED |
-| 8 | M-W8: Post-v1 Parity (Rules, MCP, Split Panes) | #28, #29, #30 | M-W7 | PLANNED |
+| 6 | M-W6: Hardening & Test Pyramid | #23, #24 | M-W4, M-W5 | COMPLETED |
+| 7 | M-W7: Reproducible Release Pipeline | #25 | M-W6 | COMPLETED |
+| 8 | M-W8: Post-v1 Parity (Rules, MCP, Split Panes) | #28, #29, #30 | M-W7 | COMPLETED |
 
 ## Milestone M-W1 Task Ledger
 - **Task 1 (#6 Reconciliation & Versioning 1.0.0)**: COMPLETED — Reconciled Cargo workspace (`1.0.0`), Gradle build configuration (`versionCode 100`, `versionName "1.0.0"`), F-Droid metadata recipe (`1.0.0`/`100`), Fastlane changelogs (`100.txt`), release scripts, CI workflows, and documentation into canonical `1.0.0` release baseline.
@@ -75,6 +75,26 @@ Every feature for issues #6 through #30 mapped into implementation waves.
 ## Milestone M-W4 Task Ledger
 - **Task 1 (#14 Multi-Turn Agent Conversations)**: COMPLETED — Interleaved agent turns, system explanation cards, streaming response blocks, and turn controls (cancel/retry/pause/resume/edit) in Jetpack Compose Block timeline (`crates/warp_ai_mobile` + Kotlin UI & JNI bindings).
 - **Task 2 (#15 Model Profiles, Tool Approvals & Audit)**: COMPLETED — Model selector profiles, high-risk command approval modal dialog (`CommandApprovalDialog`) suspending PTY execution in `MainActivity.kt` / `CommandApprovalManager.kt` until user approval, KeyStore BYOK key storage (`AiKeyStore.kt`), and 7-column RFC-4180 CSV usage audit logger (`warp-ai-usage.csv` via `AiUsageTracker.kt`). Optimized 50,000-block search benchmark (75x speedup) in `BlockSearchEngine.kt`.
+
+## Milestone M-W5 Task Ledger
+- **Task 1 (#13 Per-Block Actions)**: COMPLETED — Copy / re-run / explain / share via `BlockActionsSheet` + `BlockShareManager` + selection/find engines.
+- **Task 2 (#16 Command Editor)**: COMPLETED — `CommandHistoryManager`, ghost completion, slash-command palette.
+- **Task 3 (#17 Unified Search)**: COMPLETED — `UnifiedSearchEngine` across sessions / blocks / history / AI / files.
+- **Task 4 (#18 IME / keyboard / clipboard)**: COMPLETED — Gboard path, hardware key decoder, chunked paste.
+- **Task 5 (#19 Adaptive + a11y)**: COMPLETED — Phone/Tablet/DeX/Foldable layouts + `WarpAccessibilityNodeProvider` (closed via PR #31).
+- **Task 6 (#22 SSH)**: COMPLETED — Host-key verification dialog + session ViewModel + Rust SSH state machine.
+
+## Milestone M-W6 Task Ledger
+- **Task 1 (#23 Security Hardening)**: COMPLETED — `LogcatSanitizer`, `SecureLogger`, `KeyStoreManager`, `security-audit.sh` CI gate @ `e9a0317`.
+- **Task 2 (#24 Test Pyramid)**: COMPLETED — 805 tests (642 Kotlin JVM + 163 Rust), 4-tier drivers, CI runs `testDebugUnitTest` @ `e9a0317`.
+
+## Milestone M-W7 Task Ledger
+- **Task 1 (#25 Release Pipeline)**: COMPLETED — `release.sh`, tag-triggered `release.yml`, F-Droid recipe, `ReleasePipelineValidationTest`. Signing keystore generation remains user-gated (irreversible identity).
+
+## Milestone M-W8 Task Ledger
+- **Task 1 (#28 Project Rules & Skills)**: COMPLETED — `.warprules` parser + `.warp/skills/` local registry @ `e9a0317`.
+- **Task 2 (#29 MCP Manager)**: COMPLETED — JSON-RPC types, permissioned tool registry, stdio transport @ `e9a0317`.
+- **Task 3 (#30 Split Panes)**: COMPLETED — `PaneLayout`, `LaunchConfig`, `PaneInputRouter` @ `e9a0317`.
 
 ## Interface Contracts
 ### Kotlin `WarpAppState` ↔ Rust `warp_terminal_mobile_facade`

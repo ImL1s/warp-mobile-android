@@ -76,6 +76,7 @@ Icon
 .omc/state/
 .omc/sessions/
 .omc/artifacts/
+.omc/e2e-artifacts/
 .omc/notepad.md
 .omc/logs/
 .omc/skills/

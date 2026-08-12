@@ -1,0 +1,8 @@
+[submodule "warp-src"]
+	path = warp-src
+	url = https://github.com/ImL1s/warp.git
+	branch = warp-mobile/m0-facade
+[submodule "termux-packages"]
+	path = termux-packages
+	url = https://github.com/ImL1s/termux-packages.git
+	branch = warp-mobile/main
