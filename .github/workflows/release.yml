@@ -121,6 +121,11 @@ jobs:
           # ALLOW_DIRTY_TREE escape hatch handles this — the CI environment
           # is freshly cloned from the tag so tree is clean by construction.
           ALLOW_DIRTY_TREE: "1"
+          # Termux apt Packages index drifts frequently; accept upstream and
+          # re-pin during GitHub Release builds. Artifact SHA256SUMS still
+          # records the exact bootstrap bytes shipped. F-Droid recipes pin
+          # explicitly in metadata/ and should refresh deliberately.
+          UPDATE_SNAPSHOT: "1"
         run: |
           # Don't pass --upload here; we use gh CLI separately below
           # so we control the release notes + tag policy.
