@@ -122,10 +122,14 @@ echo "    -> $APK_DST ($SIGN_STATUS, $APK_SIZE)" >&2
 
 # ── Step 3: aggregate SHA256SUMS + release notes ──────────────────────────
 echo "==> [3/4] generating SHA256SUMS + RELEASE_NOTES.md" >&2
-(cd "$DIST_DIR" && shasum -a 256 \
-    "warp-mobile-$VERSION.apk" \
-    "bootstrap-aarch64-$VERSION.zip" \
-    > SHA256SUMS)
+(
+  cd "$DIST_DIR"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "warp-mobile-$VERSION.apk" "bootstrap-aarch64-$VERSION.zip"
+  else
+    shasum -a 256 "warp-mobile-$VERSION.apk" "bootstrap-aarch64-$VERSION.zip"
+  fi
+) > "$DIST_DIR/SHA256SUMS"
 
 # Extract the matching changelog entry (e.g. fastlane/.../changelogs/100.txt
 # for version 1.0.0 — versionCode is the file name).
@@ -139,10 +143,11 @@ fi
 
 LAST_TAG=$(git -C "$REPO_ROOT" describe --tags --abbrev=0 2>/dev/null || echo "")
 if [[ -n "$LAST_TAG" && "$LAST_TAG" != "$TAG" ]]; then
-    GIT_LOG=$(git -C "$REPO_ROOT" log "$LAST_TAG..HEAD" --oneline | head -50)
+    # Prefer -n over `… | head` — pipefail + SIGPIPE (141) aborts the script.
+    GIT_LOG=$(git -C "$REPO_ROOT" log "$LAST_TAG..HEAD" --oneline -n 50 || true)
     GIT_RANGE_NOTE="Commits since \`$LAST_TAG\`:"
 else
-    GIT_LOG=$(git -C "$REPO_ROOT" log --oneline | head -50)
+    GIT_LOG=$(git -C "$REPO_ROOT" log --oneline -n 50 || true)
     GIT_RANGE_NOTE="Latest 50 commits:"
 fi
 
