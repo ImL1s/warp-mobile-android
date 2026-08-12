@@ -9,6 +9,19 @@ resolver = "2"
 version = "1.0.0"
 edition = "2021"
 
+# Mirror the subset of warp-src [workspace.dependencies] that path-dep
+# crates (warp_terminal_mobile_facade) inherit via `workspace = true`.
+# When cargo resolves those path deps from THIS workspace root (known
+# cross-workspace quirk), inheritance must succeed here or `cargo ndk`
+# / assembleRelease fails with "`workspace.dependencies` was not defined".
+# Keep in sync with WARP_SRC_COMMIT in tools/scripts/setup-companion-sources.sh.
+[workspace.dependencies]
+log = { version = "0.4", features = ["serde", "std"] }
+ordered-float = { version = "3.0.0", features = ["serde"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+thiserror = "2.0.17"
+
 # V1-prep: aggressive release profile for the cargo-ndk-emitted
 # libwarp_mobile_android_host.so (the only consumer of this profile —
 # host tests use [profile.dev]).
