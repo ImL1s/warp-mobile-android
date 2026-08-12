@@ -76,13 +76,13 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use warp_ai_mobile::session::{TurnState};
 use warp_ai_mobile::session_registry::global_registry;
-use warp_ai_mobile::client::{AnthropicClient, SseChunkEvent};
+use warp_ai_mobile::client::AnthropicClient;
 
 
 #[cfg(target_os = "android")]
 use jni::objects::JObject;
 #[cfg(target_os = "android")]
-use jni::sys::{jboolean, jfloat, JNI_FALSE, JNI_TRUE};
+use jni::sys::{jfloat, JNI_FALSE, JNI_TRUE};
 
 #[allow(non_snake_case)]
 #[no_mangle]
