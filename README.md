@@ -4,9 +4,11 @@ An open-source Android port of [Warp Terminal](https://github.com/warpdotdev/War
 
 [![Test (Rust + Android smoke)](https://github.com/ImL1s/warp-mobile-android/actions/workflows/test.yml/badge.svg)](https://github.com/ImL1s/warp-mobile-android/actions/workflows/test.yml)
 
-**Status**: M0–M6 CLOSED, Milestones M-W1 through M-W8 COMPLETED — 805 tests (642 Kotlin + 163 Rust) passing. Version 1.0.0 (versionCode 100). Warp **engine layer** functional on Android 12+ (PTY + Vulkan grid + DCS-hook Block model + Termux runtime + BYOK AI client + SSH + MCP + Split Panes + Security Hardening). &nbsp;|&nbsp; License: AGPL-3.0-only
+**Status**: **v1.0.0-rc1** public release candidate — M0–M6 CLOSED, M-W1–W8 COMPLETED, 805 tests (642 Kotlin + 163 Rust). Warp **engine layer** on Android 12+ (PTY + Vulkan + Blocks + Termux + BYOK AI + SSH + MCP + panes + hardening). &nbsp;|&nbsp; License: AGPL-3.0-only
 
-> ⚠️ **What you actually see when you tap the icon today**: a fullscreen black Vulkan surface with a single mksh shell prompt at the top, the system Gboard at the bottom, and a custom modifier/symbol AccessoryRow above it. **This is engine-preview shape, not Warp Desktop shape.** The Block model + AI BYOK + Termux runtime + AGPL framework are all wired up underneath, but the user-facing chrome that makes Warp feel like Warp (agent conversation, block cards, sidebar, prompt suggestions) is the next major milestone.
+> 📦 **Install RC1**: [GitHub Releases — v1.0.0-rc1](https://github.com/ImL1s/warp-mobile-android/releases/tag/v1.0.0-rc1) (signed APK). Please file bugs during the soak week — see [beta feedback](https://github.com/ImL1s/warp-mobile-android/issues?q=is%3Aissue+label%3Abeta).
+
+> ⚠️ **What you actually see when you tap the icon today**: a fullscreen Vulkan terminal with a real shell, Gboard, and AccessoryRow modifiers — **engine-preview shape, not full Warp Desktop chrome**. Block/AI/Termux plumbing is wired; Warp-shaped UX (sidebar, block cards, agent-first prompt) is M7+.
 
 ---
 

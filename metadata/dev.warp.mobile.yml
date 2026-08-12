@@ -1,13 +1,10 @@
-# F-Droid metadata for warp-mobile-android (M4-S09)
+# F-Droid metadata for warp-mobile-android
 #
-# This file follows the F-Droid build recipe schema:
-#   https://f-droid.org/en/docs/Build_Metadata_Reference/
+# Schema: https://f-droid.org/en/docs/Build_Metadata_Reference/
 #
-# Project layout:
-#   - APK code: built via Gradle (./android/gradlew :app:assembleRelease)
-#   - Native libs: cross-compiled via cargo-ndk + warp-src/warpui (rlib edge)
-#   - Bootstrap zip: produced by tools/scripts/build-bootstrap.sh, sha-pinned
-#     to upstream Termux apt snapshot for reproducible rebuilds (M4-S08).
+# APK: Gradle :app:assembleRelease (unsigned — F-Droid re-signs)
+# Native: cargo-ndk + companion warp-src / termux-packages pins
+# Bootstrap: tools/scripts/build-bootstrap.sh (sha-pinned Termux apt snapshot)
 
 Categories:
   - System
@@ -16,84 +13,60 @@ Categories:
 License: AGPL-3.0-only
 SourceCode: https://github.com/ImL1s/warp-mobile-android
 IssueTracker: https://github.com/ImL1s/warp-mobile-android/issues
-
-# Both ImL1s/warp (the upstream Warp fork at warp-mobile/m0-facade branch)
-# and ImL1s/termux-packages (the retargeted termux-packages fork at
-# warp-mobile/main branch) are vendored at build time. Sources of all
-# binary content shipping in the APK are publicly available.
+Changelog: https://github.com/ImL1s/warp-mobile-android/blob/main/CHANGELOG.md
 
 AutoName: Warp Mobile
 Description: |-
-    Open-source Android port of Warp Terminal (https://github.com/warpdotdev/Warp)
-    with Block-style command grouping, DCS-hook-driven Block detection, per-cell
-    Vulkan rendering, and a bundled Termux runtime (zsh + GNU coreutils + APT).
+    Open-source Android port of Warp Terminal with Block-style command
+    grouping, per-cell Vulkan rendering, BYOK cloud AI (Haiku ghost-text +
+    Sonnet agent), and a bundled Termux runtime (zsh + GNU coreutils + APT).
 
-    Status: M3 closed (CONDITIONAL GO 2026-05-01) — DCS+Block pipeline + per-cell
-    Vulkan rendering on Android 12+ (API 31+) flagship devices (Galaxy S24 Ultra
-    primary). M4 in progress (Termux runtime integration).
+    Status: v1.0.0-rc1 engine release on Android 12+ (API 31+) flagship
+    devices. Milestones M0–M6 and Waves M-W1–W8 are complete (805 automated
+    tests). The Warp Desktop-shaped UX chrome (M7–M10) is still in progress —
+    today's launcher path is an honest engine preview, not a full Warp clone.
 
-    What works (M3 close):
+    What works:
     .
-    - 60fps per-cell dynamic_grid renderer (p95 = 13ms, peak_fps = 144)
-    - Real PTY → terminal model → Vulkan render
-    - SGR ANSI color routed through renderer
-    - DCS hook parser (ESC P $ d ... 0x9c) populates Block model
-    - Touch-drag scroll + fling momentum
-    - Gboard IME (English + Pinyin)
-    - Release APK 7.4 MB; with bootstrap zip 51 MB
+    - Real PTY → terminal model → Vulkan per-cell renderer
+    - Bundled Termux $PREFIX with zsh / GNU coreutils / APT
+    - BYOK Anthropic AI (settings → API key; ghost-text + agent explain)
+    - SSH remote sessions with host-key verification
+    - Security hardening (Keystore, logcat scrubbing)
+    - MCP tool registry, split panes, local .warprules / skills
     .
-    Architecture: 5-layer (L0 PTY/FGS → L1 warpui Vulkan → L2 facade → L3
-    Termux runtime). The native UI is Warp's own warpui (not Compose); the
-    runtime is termux-packages binaries retargeted to /data/data/dev.warp.mobile.
+    AntiFeatures: NonFreeNet applies when the user enables cloud AI against
+    Anthropic's network. Core terminal use works fully offline.
 
-    Distribution: F-Droid + GitHub Releases. Play Store is a v3+ optional path.
-
-    See README.md for full architecture, milestone state, and contribution path.
+    Distribution: F-Droid + GitHub Releases. Play Store is a later optional path.
 
 RepoType: git
 Repo: https://github.com/ImL1s/warp-mobile-android.git
 
 Builds:
-  - versionName: 1.0.0
+  - versionName: 1.0.0-rc1
     versionCode: 100
-    commit: HEAD
+    commit: v1.0.0-rc1
     subdir: android
     sudo:
       - apt-get update
       - apt-get install -y patchelf python3 zip unzip curl
     init: |-
-        # Clone the warp-src fork (separate git repo per project conventions).
-        git clone https://github.com/ImL1s/warp ../warp-src \
-            --branch warp-mobile/m0-facade --depth 1
-        # Clone the termux-packages fork (separate git repo, M4+ runtime source).
-        git clone https://github.com/ImL1s/termux-packages ../termux-packages \
-            --branch warp-mobile/main --depth 1
-        # Render the local Cargo config from the checked-in template.
+        bash ../tools/scripts/setup-companion-sources.sh
         bash ../tools/scripts/setup-cargo-config.sh
     prebuild: |-
-        # Build the bootstrap zip (M4-S03 + M4-S08 reproducibility).
-        # The snapshot pin in ../tools/scripts/m4-bootstrap-snapshot.sha256
-        # gates against upstream Termux apt repo drift. F-Droid build will
-        # FAIL if the upstream repo has updated since the pin was set; in
-        # that case the recipe should be bumped to refresh the pin.
         bash ../tools/scripts/build-bootstrap.sh aarch64 \
             ../tools/scripts/m4-bootstrap-packages.txt \
             ../_bootstrap-out
     build: |-
         ./gradlew :app:assembleRelease
-
-    # Reproducible-build attestation: the bootstrap zip's sha256 (from
-    # _bootstrap-out/bootstrap-metadata.json) is verified against the
-    # snapshot pin during prebuild; the gradle release build is
-    # deterministic given identical inputs (cargo + AGP).
     output: app/build/outputs/apk/release/app-release-unsigned.apk
-
     ndk: r29
 
-# AntiFeatures: none currently. AGPL-3.0-only with full source available;
-# no NonFreeNet, NonFreeAdd, NonFreeDep, Tracking, etc.
+AntiFeatures:
+  - NonFreeNet
 
-AutoUpdateMode: None  # Manual versioning during M4
-UpdateCheckMode: None
-CurrentVersion: 1.0.0
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 1.0.0-rc1
 CurrentVersionCode: 100

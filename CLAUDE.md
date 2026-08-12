@@ -21,7 +21,7 @@ See [`README.md`](README.md) for product description and architecture overview.
   - 77 Kotlin source files across 10 modules (ai, clipboard, editor, mcp, panes, search, security, skills, ssh, ui)
   - Terminal parser upgraded: UTF-8 streaming, CJK wide chars, OSC 0/2/7/8, alt screen, 256-color + truecolor SGR
 
-To verify currency: `git log --oneline -10` and check canonical `PROJECT.md` ledger. Current `versionName = "1.0.0"` / `versionCode = 100`.
+To verify currency: `git log --oneline -10` and check canonical `PROJECT.md` ledger. Current `versionName = "1.0.0-rc1"` / `versionCode = 100`.
 
 ## How to resume / pick up work
 

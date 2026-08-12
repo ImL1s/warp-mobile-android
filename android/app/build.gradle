@@ -832,7 +832,7 @@ task verifyValidationLayer {
 //     -keyalg RSA -keysize 4096 -validity 25000
 //
 // Then create android/keystore.properties (also gitignored):
-//   storeFile=../keystore.jks
+//   storeFile=keystore.jks
 //   storePassword=<password>
 //   keyAlias=warp-mobile-release
 //   keyPassword=<password>
@@ -858,8 +858,9 @@ android {
         minSdk 31
         targetSdk 36
         // Milestone M-W1 Task 1: bumped to 1.0.0 (versionCode 100) to reflect version reconciliation.
+        // v1.0.0-rc1: same versionCode; soak before promoting the final v1.0.0 tag.
         versionCode 100
-        versionName "1.0.0"
+        versionName "1.0.0-rc1"
     }
 
     signingConfigs {

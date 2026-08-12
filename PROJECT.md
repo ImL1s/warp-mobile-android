@@ -9,7 +9,7 @@
 5. **AI & Safety Layer**: Multi-turn agent timeline conversation (`crates/warp_ai_mobile`), Model selector profiles, Tool execution safety loop with user approval dialogs, Android KeyStore BYOK key storage, Audit logger (`warp-ai-usage.csv`), Project Rules & Local Skills, MCP Client/Server Manager.
 
 ## Version Baseline
-Canonical App Version: `1.0.0` (versionCode: `100`).
+Canonical App Version: `1.0.0-rc1` (versionCode: `100`).
 
 ## Feature Inventory
 Every feature for issues #6 through #30 mapped into implementation waves.

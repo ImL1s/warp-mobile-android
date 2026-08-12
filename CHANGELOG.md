@@ -14,7 +14,7 @@ For per-milestone narrative + ledger detail (codex review rounds, per-layer GO/C
 
 For per-iteration lessons learned, see [`progress.txt`](progress.txt).
 
-## [Unreleased]
+## [1.0.0-rc1] — 2026-08-12
 
 ### Added (Wave 6-8: Issues #19, #22-#25, #28-#30)
 
