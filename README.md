@@ -20,7 +20,7 @@ The port is not a thin wrapper or a Compose-based re-implementation. Warp's own 
 
 Starting with M4, the port bundles a forked `termux-packages` collection so the device ships a proper Linux `$PREFIX` (zsh, GNU coreutils, APT). The terminal GUI substrate is Warp's `warpui`; the runtime is Termux's package ecosystem rehosted under this project's package name. This is not a Termux fork — we do not fork `termux-app`.
 
-This is a solo-developer project on a 12-18 month constrained-beta timeline. It is honest-beta software: flagship Android devices show the engine working; low-end devices, full Termux integration, and the Warp-shaped UX layer are all in progress. F-Droid and GitHub Releases are the primary distribution targets; Play Store is a v3+ optional path.
+This is a solo-developer project on a 12-18 month constrained-beta timeline. It is honest-beta software: flagship Android devices show the engine working. Termux (`zsh` / GNU coreutils / APT) ships inside the RC1 APK. Low-end devices and the Warp-shaped UX layer (M7+) are still in progress. F-Droid and GitHub Releases are the primary distribution targets; Play Store is a v3+ optional path.
 
 ---
 
@@ -45,7 +45,7 @@ Low-end Adreno 618-642L devices (Pixel 4a, Galaxy A52s) are on the roadmap but n
 
 ---
 
-## What works today (M3 close)
+## What works today (v1.0.0-rc1)
 
 All of the following are empirically verified on Galaxy S24 Ultra.
 
@@ -58,7 +58,7 @@ All of the following are empirically verified on Galaxy S24 Ultra.
 **Terminal pipeline (end-to-end)**
 
 - Real PTY → terminal model → per-cell renderer (`ls -la /system` works: 995 glyph quads, 39 atlas glyphs, 1323 bytes ingested, 19 visible rows)
-- SGR ANSI color (RED/GREEN/BLUE/reset) correctly routed through the renderer; toybox `ls` on stock Android does not emit ANSI colors — GNU coreutils `ls --color=auto` via Termux (M5) closes that gap
+- SGR ANSI color (RED/GREEN/BLUE/reset) correctly routed through the renderer; GNU coreutils `ls --color=auto` via the bundled Termux `$PREFIX`
 - Scrollback ring buffer: ≥1000 lines retained; 2000 lines injected → 1000 retained correctly
 
 **Block model**
@@ -73,10 +73,18 @@ All of the following are empirically verified on Galaxy S24 Ultra.
 - Gboard (English + Pinyin) IME: one character per keystroke on editable region; composing-text (Chinese) updates in-place without flicker
 - `WindowInsets` correctly reserves bottom region for IME; full-screen mode hides nav bar
 
+**Termux / SSH / AI (M4–M6 + Waves)**
+
+- Bundled `$PREFIX` with `zsh`, GNU coreutils, and APT; first-launch extract; binaries exec via `nativeLibraryDir` (`apk_data_file`, SELinux-safe)
+- SSH remote sessions with host-key verification
+- BYOK Anthropic (Haiku ghost-text + Sonnet agent)
+- MCP tool registry, split panes, local `.warprules` / skills
+- Security: Android Keystore + logcat sanitizer
+
 **APK size**
 
-- Release APK: **7.4 MB** (7,775,816 bytes); 90.7% margin under the 80 MB gate
-- Combined APK + bootstrap: 7.4 MB today; ~73 MB headroom for the Termux bundle planned in M4
+- Signed GitHub Release APK (`v1.0.0-rc1`): **~106 MB** (Termux bootstrap packaged inside)
+- Size gate: 160 MB (raised from the M3 80 MB gate when Termux-in-APK landed)
 - Vulkan validation layer absent from release build
 
 **Upstream compatibility**
@@ -93,12 +101,12 @@ These are the things a user familiar with Warp Desktop will notice missing the m
 |---|---|---|
 | Sidebar with sessions / agents / files | Single fullscreen surface, no sidebar | M7 |
 | Top search bar ("Search sessions, agents, files…") | None | M7 |
-| Agent-first prompt screen ("New Oz agent conversation") | Raw mksh prompt | M9 |
+| Agent-first prompt screen ("New Oz agent conversation") | Raw zsh prompt | M9 |
 | Block rendered as interactive card with copy / explain / re-run | Flat Vulkan grid text | M8 |
 | Bottom prompt box ("Warp anything…") with autocomplete + model picker | System Gboard + AccessoryRow | M9 |
 | `/model`, `/remote-control`, command palette | None | M9 |
 | Tab management | None — single grid | M7 |
-| `$PREFIX/bin/*` commands runnable (zsh, ls, cat, …) | Blocked by SELinux `app_data_file` exec denial | v1.1 (`.omc/v1.1-plan-selinux-nativelib.md` — relocate Termux binaries into `nativeLibraryDir`) |
+| Color emoji (COLR v1 Noto) | swash 0.1.19 is COLR v0 only | v1+ |
 
 The engine pieces are in place: Block aggregation logic, BYOK Anthropic client (Haiku ghost-text + Sonnet agent), Termux bootstrap zip, font shaping with CJK, IME → PTY input pipeline. M7+ work is to surface them through a Warp-shaped chrome layer instead of the current bare Vulkan grid + Gboard.
 
@@ -135,10 +143,10 @@ L2b Warp facade                 warp_terminal_mobile_facade — wraps the app::t
 L3  Termux Runtime              Fork of termux-packages retargeted to dev.warp.mobile prefix.
                                 Bootstrap zip bundled in APK; first-launch extraction to
                                 /data/data/dev.warp.mobile/files/termux/.
-                                (M4 in progress: zsh + GNU coreutils + APT)
+                                (M4 closed: zsh + GNU coreutils + APT in the RC1 APK)
 ```
 
-Cloud AI (Anthropic API — Haiku + Sonnet) runs as a separate concern, not a layer. User-supplied API key (BYOK). Planned for M6; AGPL §13 not triggered by client-only API consumption.
+Cloud AI (Anthropic API — Haiku + Sonnet) runs as a separate concern, not a layer. User-supplied API key (BYOK). Shipped in M6; AGPL §13 not triggered by client-only API consumption.
 
 **Plan Amendment 5 (M3)**: the original plan gated `app::terminal::*` desktop-only code paths with `#[cfg]` so the full `app/` crate could build for Android. Empirical measurement found 41 cfg-gate lines yielded 145 compile errors across 19 `app/` subsystems — architecture mismatch, not a budget overrun. Amendment 5 pivoted to extraction: the relevant `Block`, `BlockList`, DCS parser, and ANSI dispatch types are extracted into `warp_terminal_mobile_facade::app_terminal::*`. The `app/` crate does not appear in the Android build graph at all.
 
@@ -193,15 +201,15 @@ adb shell am start -n dev.warp.mobile/.MainActivity
 ### Build sanity checks
 
 ```bash
-# Host-side unit tests (45 passing at M3 close)
+# Host-side unit tests (29 passing)
 cargo test -p warp-mobile-android-host
 
-# Facade tests in warp-src workspace (73 passing at M3 close)
+# Facade tests in warp-src workspace (89 passing)
 cargo test -p warp_terminal_mobile_facade --manifest-path warp-src/Cargo.toml
 
-# Release APK size check (should be ~7.4 MB at M3 baseline)
+# Release APK size check (RC1 signed APK is ~106 MB with Termux inside)
 cd android && ./gradlew :app:assembleRelease
-du -h app/build/outputs/apk/release/app-release-unsigned.apk
+du -h app/build/outputs/apk/release/app-release*.apk
 ```
 
 ### Cutting a release (v1-prep)
@@ -313,11 +321,11 @@ warp-mobile-android/
 │
 ├── spikes/                     M0 spike crates (vulkan-surface-recreate, symlink-jnilibs)
 │
-├── warp-src/                   GITIGNORED — Warp upstream fork (separate git repo)
-│                               Clone: git clone ImL1s/warp → checkout warp-mobile/m0-facade
+├── warp-src/                   Companion clone (not committed) — ImL1s/warp pin
+│                               setup-companion-sources.sh / .gitmodules URL
 │
-├── termux-packages/            GITIGNORED — Termux fork (separate git repo, M4+)
-│                               Clone: git clone ImL1s/termux-packages → checkout warp-mobile/main
+├── termux-packages/            Companion clone (not committed) — ImL1s/termux-packages pin
+│                               setup-companion-sources.sh / .gitmodules URL
 │
 └── .omc/
     ├── plans/                  Canonical RALPLAN with 5 amendments

@@ -32,10 +32,12 @@ on:
           - i686
           - x86_64
   push:
+    branches: [main]
     paths:
       - '.github/workflows/build-bootstrap.yml'
       - 'tools/scripts/build-bootstrap.sh'
       - 'tools/scripts/m4-bootstrap-packages.txt'
+      - 'tools/scripts/m4-bootstrap-snapshot.sha256'
 
 jobs:
   build:

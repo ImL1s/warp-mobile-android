@@ -6,14 +6,13 @@ cosmic-text) on-device via Android NDK, and bundles a forked Termux runtime
 (zsh + GNU coreutils + APT) so device shells get a real Linux-style $PREFIX
 ecosystem.
 
-Status (2026-05-01): M3 closed CONDITIONAL GO. Layer 2b integration done —
-PTY → terminal model → Vulkan renderer pipeline runs at 60fps with p95 = 13ms
-on Galaxy S24 Ultra (Snapdragon 8 Gen 3 / Adreno 750 / API 36). DCS hook
-parser populates the Block model end-to-end with synthetic + real shell
-inputs. M4 in progress: Termux runtime integration (43 MB bootstrap zip
-extracts atomically on first launch, sha-pinned to upstream Termux apt
-snapshot for reproducible rebuilds). 7 of 15 M4 stories closed at time of
-publish.
+Status (2026-08-12): v1.0.0-rc1 public release candidate. Milestones M0–M6
+and Waves M-W1–W8 are complete (805 automated tests). PTY → terminal model →
+Vulkan renderer runs at 60fps with p95 = 13ms on Galaxy S24 Ultra
+(Snapdragon 8 Gen 3 / Adreno 750 / API 36). Termux runtime (zsh + GNU
+coreutils + APT) ships inside the APK. Warp Desktop-shaped UX chrome
+(M7–M10) is still in progress — today's launcher path is an honest engine
+preview, not a full Warp clone.
 
 What works today on flagship devices:
 
