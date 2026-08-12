@@ -649,10 +649,16 @@ task verifyBootstrapApkSize {
         // Measure assembled release APK size. By this point packageRelease has
         // produced the artifact; missing-file is now a real failure, not a
         // benign skip (round-1 finding 1).
-        def apkPath = file("build/outputs/apk/release/app-release-unsigned.apk")
-        if (!apkPath.exists()) {
+        // Signed builds emit app-release.apk; unsigned (F-Droid) emit
+        // app-release-unsigned.apk. Accept either after packageRelease.
+        def apkDir = file("build/outputs/apk/release")
+        def apkPath = [
+            file("${apkDir}/app-release.apk"),
+            file("${apkDir}/app-release-unsigned.apk"),
+        ].find { it.exists() }
+        if (apkPath == null) {
             throw new GradleException(
-                "verifyBootstrapApkSize: expected ${apkPath.absolutePath} to exist after packageRelease.\n" +
+                "verifyBootstrapApkSize: expected app-release.apk or app-release-unsigned.apk under ${apkDir.absolutePath} after packageRelease.\n" +
                 "Either packageRelease did not run (re-run with `:app:assembleRelease`)\n" +
                 "or AGP changed the output path."
             )
