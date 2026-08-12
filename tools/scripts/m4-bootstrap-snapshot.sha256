@@ -2,4 +2,4 @@
 # concatenated then re-hashed. Bump via UPDATE_SNAPSHOT=1 ./build-bootstrap.sh.
 # Drift = upstream Termux apt repo changed; either bump pin (and rebuild) or
 # the build fails with a clear message.
-eb26b0535e32a0484cee7a78e6e6747a66d3929aa3ea8e25ad20d0f564003c7a
+e6063bb7e3da7ea8afb4dc02bf4251ad6346d9178778e91be09ca29a502a80cf
