@@ -36,7 +36,7 @@ This is a solo-developer project on a 12-18 month constrained-beta timeline. It 
 | **M5** | Mobile UX polish — selection / accessory row / blocks / paste / paste UX | CLOSED PARTIAL ✅ | 5/8 PASS |
 | **M6** | AI integration — Haiku inline ghost-text, Sonnet agent (BYOK) | CLOSED ✅ | 7/7 PASS |
 | **M-W1–W8** | Foundation + SSH + Security + MCP + Split Panes + Skills + Test Pyramid + Release Pipeline | COMPLETED ✅ | Issues #6, #19, #22-#30 |
-| **v1.1** | SELinux nativeLibraryDir refactor — `$PREFIX/bin/*` exec restored | Planned | `.omc/v1.1-plan-selinux-nativelib.md` |
+| **v1.1** | SELinux nativeLibraryDir refactor — `$PREFIX/bin/*` exec via `apk_data_file` | SHIPPED (iter-20) | bundled in RC1 APK |
 | **M7–M10** | **Warp-shape UX layer** (sidebar / Block cards / agent-first prompt screen / model picker / tab manager) — see "What does NOT work yet" below | Not started | TBD |
 
 **Primary test device**: Galaxy S24 Ultra (Snapdragon 8 Gen 3 / Adreno 750 / API 36).
