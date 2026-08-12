@@ -103,12 +103,12 @@ jobs:
           if [[ -n "$KEYSTORE_BASE64" ]]; then
             echo "Decoding keystore..."
             echo "$KEYSTORE_BASE64" | base64 -d > android/keystore.jks
-            cat > android/keystore.properties <<EOF
-storeFile=keystore.jks
-storePassword=$KEYSTORE_PASSWORD
-keyAlias=$KEY_ALIAS
-keyPassword=$KEY_PASSWORD
-EOF
+            printf '%s\n' \
+              "storeFile=keystore.jks" \
+              "storePassword=${KEYSTORE_PASSWORD}" \
+              "keyAlias=${KEY_ALIAS}" \
+              "keyPassword=${KEY_PASSWORD}" \
+              > android/keystore.properties
             echo "  -> signed APK path will be used"
           else
             echo "  -> no signing secrets; will produce UNSIGNED APK (F-Droid path)"
