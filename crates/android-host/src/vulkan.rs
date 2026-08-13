@@ -153,7 +153,7 @@ fn create_vulkan_instance(entry: &ash::Entry) -> Result<ash::Instance, vk::Resul
         .engine_version(vk::make_api_version(0, 0, 1, 0))
         .api_version(vk::API_VERSION_1_1);
 
-    let mut extension_names: Vec<*const u8> = vec![
+    let mut extension_names: Vec<*const std::ffi::c_char> = vec![
         ash::khr::surface::NAME.as_ptr(),
         ash::khr::android_surface::NAME.as_ptr(),
     ];
@@ -161,7 +161,7 @@ fn create_vulkan_instance(entry: &ash::Entry) -> Result<ash::Instance, vk::Resul
         extension_names.push(ash::ext::debug_utils::NAME.as_ptr());
     }
 
-    let layer_names: Vec<*const u8> = if VALIDATION_LAYERS {
+    let layer_names: Vec<*const std::ffi::c_char> = if VALIDATION_LAYERS {
         // SAFETY: enumerate_instance_layer_properties is safe with a loaded entry.
         let available =
             unsafe { entry.enumerate_instance_layer_properties() }.unwrap_or_default();
@@ -173,7 +173,7 @@ fn create_vulkan_instance(entry: &ash::Entry) -> Result<ash::Instance, vk::Resul
         });
         if found {
             log::info!(target: "WarpVulkan", "VK_LAYER_KHRONOS_validation enabled");
-            vec![khronos_val.as_ptr() as *const u8]
+            vec![khronos_val.as_ptr()]
         } else {
             // Round-2 (Codex blocker 4b): in debug builds, validation layer is
             // a HARD M2-S04 acceptance gate. Silently warning + continuing led
